@@ -448,9 +448,10 @@ A v5 ProRegTx is invalid if any of the following conditions hold:
     `shares[i].ownerKey` over the registration consent digest defined
     below.
 
-Rules 17 and 18 are evaluated in order: `inputsHash` mismatch and the
-recomputed `outputsHash` mismatch (see below) are checked before any
-ECDSA signature verification.
+Rules 17 and 18 are evaluated before any ECDSA signature verification.
+Consensus computes `outputsHash` from the transaction outputs when building
+the registration consent digest; there is no payload `outputsHash` field in
+a v5 ProRegTx.
 
 ### Registration Consent Digest
 
