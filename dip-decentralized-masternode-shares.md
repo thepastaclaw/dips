@@ -266,21 +266,30 @@ The shared collateral output uses a single, fixed serialized script,
 3. It is recognizable by full nodes using a single template comparison, and
    it is recognizable as non-standard by older nodes that do not understand
    shared collateral.
-4. After activation, consensus protects **shared collateral outpoints** — the
-   set of UTXOs that are either (a) recorded as the collateral outpoint of an
-   active v5 masternode in the deterministic masternode list, or (b) created
-   by a valid v5 ProRegTx earlier in the same block currently being
-   validated. Any spend of an outpoint in this set is rejected unless the
-   spending transaction is a valid `ProDisTx` for the corresponding
-   masternode. Outpoints in this set are referred to below as
-   "active-or-pending shared collateral outpoints" and the rejection is
-   enforced at mempool acceptance, at block connection, and during
-   deterministic masternode list processing (see [Collateral Spend
-   Enforcement](#collateral-spend-enforcement)).
-5. Ordinary UTXOs that happen to pay `SHARED_COLLATERAL_SCRIPT` but are NOT
-   active-or-pending shared collateral outpoints are NOT bound by the
-   dissolution covenant. They behave as ordinary outputs at script-evaluation
-   time, subject to whatever spending conditions the recommended template
+4. After activation, consensus protects two distinct classes of UTXOs:
+   * (a) **Active shared collateral outpoints** — outpoints recorded as
+     the collateral of an active v5 masternode in the deterministic
+     masternode list at the parent state of the block (or mempool tip)
+     being validated. A spend of an outpoint in this class is rejected
+     unless the spending transaction is a valid `ProDisTx` for the
+     corresponding masternode.
+   * (b) **Same-block pending shared collateral outputs** — shared
+     collateral outputs created by a valid v5 ProRegTx earlier in the
+     block currently being validated. A spend of an output in this
+     class later in the same block is rejected unconditionally: ordinary
+     spends are rejected because the outpoint represents a freshly
+     created masternode commitment, and `ProDisTx` is rejected because
+     the registration is not yet part of the parent deterministic state
+     a dissolution would consult. Dissolution of such a masternode is
+     permitted only in a strictly later block, after the registration
+     has been recorded in the deterministic masternode list.
+   Rejection is enforced at mempool acceptance, at block connection, and
+   during deterministic masternode list processing (see [Collateral
+   Spend Enforcement](#collateral-spend-enforcement)).
+5. Ordinary UTXOs that happen to pay `SHARED_COLLATERAL_SCRIPT` but are
+   NOT in either protected class above are NOT bound by the dissolution
+   covenant. They behave as ordinary outputs at script-evaluation time,
+   subject to whatever spending conditions the recommended template
    imposes (for example, the `OP_TRUE` redeem-script template makes them
    anyone-can-spend). Implementations MUST NOT retroactively lock arbitrary
    pre-existing outputs or unrelated outputs created outside the v5
@@ -303,12 +312,17 @@ identical across all consensus implementations and MUST be encoded into the
 chain parameters used for activation. The DIP is amended with the assigned
 bytes before mainnet activation.
 
-This DIP is therefore NOT final for activation: it remains a Draft until
-the concrete `SHARED_COLLATERAL_SCRIPT` byte sequence is assigned and
-inserted here. The draft is suitable for review of the consensus rules and
-covenant model, but no implementation may treat the script as fixed until
-this section is updated with the assigned bytes (see [Open
-Issues](#open-issues)).
+This DIP is therefore NOT final for activation. It remains a Draft until
+the concrete `SHARED_COLLATERAL_SCRIPT` byte sequence is assigned, the
+special transaction type numbers are confirmed against the live Dash
+Core allocation, and the DIP-0023 deployment parameters are assigned.
+The draft is suitable for review of the consensus rules and the
+covenant model, but no implementation may treat the script bytes or the
+deployment parameters as fixed until this section and [Open
+Issues](#open-issues) are updated with the assigned values. Critical
+consensus details that depend on those exact bytes (template equality
+checks, mempool / mining policy rejection, and chain-parameter
+encodings) MUST NOT be considered finalized in this revision.
 
 Rationale: a P2SH anyone-can-spend template makes the script-level
 satisfaction trivial so that a valid `ProDisTx` can construct a sensible
@@ -847,11 +861,19 @@ miners include them.
 
 #### Same-block ordering
 
-A `ProDisTx` MAY appear in the same block as the v5 `ProRegTx` that
-created the spent shared collateral output, provided every other
-shared-collateral consensus rule holds. Block validation MUST track shared
-collateral outputs created earlier in the same block (see [Collateral
-Spend Enforcement](#collateral-spend-enforcement)).
+A `ProDisTx` MUST NOT appear in the same block as the v5 `ProRegTx`
+that creates the shared collateral output it would spend. Dissolution
+operates against the deterministic masternode state at the parent
+block, so the registering masternode is not yet part of that state
+until the registering block has been connected. A `ProDisTx` whose
+input refers to a shared collateral output created earlier in the
+same block is therefore invalid even if every other covenant rule
+would otherwise hold; dissolution is permitted only in a strictly
+later block. Block validation MUST track shared collateral outputs
+created earlier in the same block solely so that any spend of those
+outputs later in the same block — ordinary or `ProDisTx` — can be
+rejected (see [Collateral Spend
+Enforcement](#collateral-spend-enforcement)).
 
 #### State effect
 
@@ -869,63 +891,75 @@ bears no special-transaction payload would, under DIP-0003 rules, simply
 remove the masternode by collateral spend. Implementations MUST also
 enforce the rules below outside `CheckSpecialTx`.
 
-The protected set is the set of **active-or-pending shared collateral
-outpoints**, defined as:
+The protected set has two parts with different rules:
 
-* every collateral outpoint recorded against an active v5 masternode in
-  the deterministic masternode list at the parent of the block (or
-  mempool tip) being validated, plus
-* every collateral outpoint created by a valid v5 ProRegTx that has been
-  processed earlier in the block currently being validated and that has
-  not itself already been dissolved earlier in that block.
+* **Active set.** Every collateral outpoint recorded against an active
+  v5 masternode in the deterministic masternode list at the parent of
+  the block (or mempool tip) being validated. A spend of an outpoint
+  in the active set is rejected unless it is a valid `ProDisTx` for
+  the matching masternode.
+* **Same-block pending set.** Every shared collateral outpoint created
+  by a valid v5 ProRegTx earlier in the block currently being
+  validated. A spend of an outpoint in the same-block pending set is
+  rejected unconditionally: ordinary spends are rejected because the
+  outpoint represents an active masternode commitment, and `ProDisTx`
+  spends are rejected because the registration is not yet part of the
+  parent deterministic state. Dissolution of such a masternode is
+  permitted only in a strictly later block.
 
 A UTXO whose `scriptPubKey` equals `SHARED_COLLATERAL_SCRIPT` but whose
-outpoint is not in this set is NOT protected by the covenant and is not
+outpoint is in neither set is NOT protected by the covenant and is not
 the subject of the rules below. The rules deliberately key off the
 recorded outpoint identity, not raw script equality, to avoid
 retroactively locking pre-existing or unrelated outputs that happen to
 match the template.
 
 1. **Mempool acceptance.** Before accepting any transaction into the
-   mempool, scan its inputs. For each input that spends an
-   active-or-pending shared collateral outpoint, reject the transaction
-   unless it is a valid `ProDisTx` for the masternode whose collateral
-   outpoint matches the spent outpoint in the current deterministic
-   masternode list.
+   mempool, scan its inputs. For each input that spends an outpoint in
+   the active set, reject the transaction unless it is a valid
+   `ProDisTx` for the masternode whose collateral outpoint matches the
+   spent outpoint in the current deterministic masternode list. The
+   same-block pending set is not consulted at mempool acceptance time;
+   it is computed per block by block-connection logic.
 2. **Block connection, prior blocks.** Before applying the deterministic
    masternode list update for a connected block, scan every non-coinbase
-   transaction in that block for inputs that spend collateral outpoints
-   of active v5 masternodes in the parent-state deterministic masternode
-   list. Reject the block unless every such input is the input of a
-   valid `ProDisTx` for the matching masternode.
+   transaction in that block for inputs that spend outpoints in the
+   active set (collateral outpoints of active v5 masternodes in the
+   parent-state deterministic masternode list). Reject the block unless
+   every such input is the input of a valid `ProDisTx` for the matching
+   masternode.
 3. **Block connection, same-block.** Maintain a per-block index of
-   shared collateral outputs created by valid v5 ProRegTx earlier in the
-   same block, keyed by `(txid, vout, proTxHash)`. For every later
-   non-coinbase transaction in the same block, reject inputs that spend
-   such outputs unless the spending transaction is a valid `ProDisTx`
-   referencing the corresponding `proTxHash`. The matching `ProDisTx`
-   MUST appear strictly after the registration in the block ordering.
+   shared collateral outputs created by valid v5 ProRegTx earlier in
+   the same block, keyed by `(txid, vout, proTxHash)`. For every later
+   non-coinbase transaction in the same block, reject any input that
+   spends such an output. Both ordinary spends and `ProDisTx` spends
+   are rejected: a `ProDisTx` whose input refers to a shared collateral
+   output created in the same block is invalid even if every other
+   covenant rule would otherwise hold.
 4. **Deterministic masternode list removal.** Replace the
-   "remove on collateral spend" rule from DIP-0003 with the following for
-   v5 masternodes: a v5 masternode MUST NOT be removed until a
-   corresponding valid `ProDisTx` for that `proTxHash` has been processed.
-   Any spend of the masternode's shared collateral outpoint by a
-   transaction that is not such a `ProDisTx` is invalid.
+   "remove on collateral spend" rule from DIP-0003 with the following
+   for v5 masternodes: a v5 masternode MUST NOT be removed until a
+   corresponding valid `ProDisTx` for that `proTxHash` has been
+   processed in a strictly later block than the block that contained
+   the registering v5 ProRegTx. Any spend of the masternode's shared
+   collateral outpoint by a transaction that is not such a `ProDisTx`
+   is invalid.
 5. **Block disconnection and reorg.** Disconnecting a block that
    contained a `ProDisTx` MUST restore the v5 masternode entry to the
-   exact pre-dissolution deterministic masternode state. State diffs MUST
-   capture the full share vector and shared-registration parameters as a
-   single replacement (see [Deterministic Masternode
+   exact pre-dissolution deterministic masternode state. State diffs
+   MUST capture the full share vector and shared-registration
+   parameters as a single replacement (see [Deterministic Masternode
    State](#deterministic-masternode-state)) so that reorg replay is
    deterministic.
 
-These rules are evaluated before script-level evaluation for inputs that
-spend active-or-pending shared collateral outpoints: even if the
-underlying redeem script is trivially satisfiable, consensus rejects the
-spend of a protected outpoint unless the spend is a valid `ProDisTx` for
-the corresponding masternode. Spends of unprotected UTXOs that happen to
-bear the same script are not subjected to the covenant and are
-script-evaluated normally.
+These rules are evaluated before script-level evaluation for inputs
+that spend outpoints in either protected set: even if the underlying
+redeem script is trivially satisfiable, consensus rejects the spend of
+an active-set outpoint unless the spend is a valid `ProDisTx` for the
+corresponding masternode, and rejects every spend of a same-block
+pending outpoint unconditionally. Spends of unprotected UTXOs that
+happen to bear the same script are not subjected to the covenant and
+are script-evaluated normally.
 
 ### Deterministic Masternode State
 
@@ -948,11 +982,15 @@ MUST be serialized as empty. `keyIDOwner` is unused for v5 masternodes.
 State diffs MUST be version-gated:
 
 1. The state-diff bitfield gains a new field bit for the share vector.
-   Any change to any `shares[i].rewardScript` produces a state diff in
-   which the share vector is fully replaced. Implementations MAY also
-   choose to encode per-share rewardScript diffs more compactly; if so,
-   the encoding MUST be invertible byte-for-byte from the resulting
-   state.
+   Any change to any field of any `shares[i]` (including a
+   per-share `rewardScript` change from a `ProUpShareTx`) MUST produce
+   a state diff in which the entire share vector is fully replaced.
+   This full-replacement encoding is the single canonical
+   representation of a v5 share-state diff: compact diffs, per-share
+   field diffs, and any other alternative encoding of share-vector
+   changes are NOT permitted. Implementations MUST emit and accept
+   share-vector changes only as a full replacement of the share
+   vector.
 2. State diffs for v5 fields are present only when the masternode is
    v5; for pre-v5 masternodes the corresponding bits MUST NOT appear.
 3. Snapshot serialization MUST round-trip across restart, reorg replay,
@@ -1031,11 +1069,22 @@ scope of this DIP.
 
 ## Deployment and Compatibility
 
-Activation of this DIP is gated by a future deployment defined under
-[DIP-0023](dip-0023.md). The exact deployment name and signaling window
-are assigned during release engineering. This DIP does not claim a
-specific Dash Core release; release engineering MUST verify the live
-deployment state of any candidate fork bit before assigning activation.
+**Draft status.** This DIP is a Draft. Activation parameters — the
+concrete byte sequence of `SHARED_COLLATERAL_SCRIPT`, the special
+transaction type numbers, and the DIP-0023 deployment name and
+signaling window — are NOT finalized in this revision. The consensus
+model and covenant rules below are written to be reviewable as a
+draft and MUST NOT be treated as activation-ready until those
+parameters are assigned and this DIP is updated accordingly (see
+[Open Issues](#open-issues)).
+
+Activation of this DIP is gated by an intended future deployment
+defined under [DIP-0023](dip-0023.md). The exact deployment name and
+signaling window are assigned during release engineering. This DIP
+does not claim any specific Dash Core release for activation; release
+engineering MUST verify the live deployment state of any candidate
+fork bit before assigning activation, and the activation target is
+subject to DIP editor assignment.
 
 Before activation:
 
@@ -1162,13 +1211,21 @@ transactions that spend the shared collateral output would not invoke
 rule would otherwise quietly drop the masternode. The required mempool
 and block-validation hooks are made explicit.
 
-### Same-block dissolution
+### Same-block dissolution forbidden
 
-Allowing a `ProDisTx` in the same block as the corresponding v5
-ProRegTx lets a participant exit immediately after registration, which
-is important for use cases where coordination off-chain proved
-unsatisfactory. It also matches the existing behavior that a regular
-collateral can be spent in the same block as its ProRegTx.
+A `ProDisTx` is invalid in the same block as the v5 ProRegTx that
+creates the shared collateral output it would spend. Dissolution
+operates against the deterministic masternode state at the parent
+block, so allowing same-block dissolution would require either a
+mid-block speculative state machine or a duplicated validation path
+that reads the in-progress block under construction. Forbidding the
+same-block case keeps state transitions atomic at block boundaries,
+matches how DIP-0003 ProUp*Tx are evaluated against the parent state,
+and aligns the protected-set rule with a single canonical
+share-vector diff (see [Deterministic Masternode
+State](#deterministic-masternode-state)). A participant who wishes to
+exit immediately after registration can do so in the next block at no
+additional cost beyond standard fees.
 
 ### One vote per masternode
 
@@ -1287,14 +1344,27 @@ chain parameters.
     mempool and by block validation.
 15. A non-dissolution special transaction whose input spends the
     collateral outpoint of an active v5 masternode is rejected.
-16. A v5 ProRegTx and a unilateral `ProDisTx` for the same `proTxHash`
-    in the same block, in that order, are accepted; the masternode is
-    created and then removed within the block.
-17. An ordinary transaction whose input spends an unrelated UTXO that
+16. A normal (non-`ProDisTx`) transaction later in the same block as a
+    v5 ProRegTx that spends the just-created shared collateral output
+    is rejected at block connection.
+17. A unilateral `ProDisTx` for the same `proTxHash` in the same block
+    as the v5 ProRegTx that creates its shared collateral output is
+    invalid, regardless of ordering within the block and regardless of
+    whether every other covenant rule holds.
+18. A unanimous `ProDisTx` for the same `proTxHash` in the same block
+    as the v5 ProRegTx that creates its shared collateral output is
+    invalid on the same basis as the unilateral case.
+19. A `ProDisTx` (unilateral or unanimous) that spends the shared
+    collateral outpoint of a v5 masternode whose v5 ProRegTx was
+    confirmed in a strictly earlier block, and that otherwise
+    satisfies every covenant rule, is valid; the masternode is
+    removed when this block is connected.
+20. An ordinary transaction whose input spends an unrelated UTXO that
     happens to pay `SHARED_COLLATERAL_SCRIPT` but is NOT a recorded
-    active or same-block-pending shared collateral outpoint is NOT
-    rejected by the covenant; whether it succeeds depends only on
-    ordinary script evaluation of the underlying redeem script.
+    active shared collateral outpoint and is NOT a same-block pending
+    shared collateral outpoint is NOT rejected by the covenant;
+    whether it succeeds depends only on ordinary script evaluation of
+    the underlying redeem script.
 
 ### Reorg
 
@@ -1320,10 +1390,14 @@ These notes are non-normative guidance for implementers.
   spend rejection applies to *every* transaction in mempool and block
   contexts, not only to special transactions.
 * The same-block index of new shared collateral outputs introduced by
-  v5 ProRegTx earlier in the block can be implemented as a
-  small `std::unordered_map<COutPoint, uint256 /* proTxHash */>` that is
-  populated as block transactions are validated and consulted by every
-  later transaction's input scan.
+  v5 ProRegTx earlier in the block can be implemented as a small
+  `std::unordered_set<COutPoint>` (or
+  `std::unordered_map<COutPoint, uint256 /* proTxHash */>` if the
+  diagnostic value is wanted) that is populated as block transactions
+  are validated and consulted by every later transaction's input scan.
+  Any spend of an outpoint in this set within the same block is
+  rejected, including by `ProDisTx`; same-block dissolution is not a
+  legal path.
 * Coinbase construction should reuse the existing payout-pipeline hook
   added by DIP-0026 (PR 184) and append one output per v5 share with the
   computed amount and target script.
