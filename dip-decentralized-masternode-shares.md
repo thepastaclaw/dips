@@ -198,12 +198,25 @@ before fees.
 
 ### Provider Transaction Version
 
-This DIP introduces one new provider transaction payload version and three
-new special transaction types.
+This DIP introduces one new ProRegTx payload version and three new special
+transaction types, each with its own independent payload version.
 
 | Name | Value | Applies to |
 | --- | ---: | --- |
-| `ProTxVersion::SharedCollateral` | 5 | `ProRegTx`, `ProUpShareTx`, `ProUpSharedRegTx`, `ProDisTx` |
+| `ProTxVersion::SharedCollateral` | 5 | `ProRegTx` payload version for shared-collateral registration and the corresponding shared masternode state. |
+
+`ProTxVersion::SharedCollateral = 5` is the provider transaction payload
+version of a v5 `ProRegTx` and is also the version tag carried in the
+deterministic masternode state for masternodes registered by such a
+transaction. It does NOT apply as the payload version of the new special
+transaction types introduced below; those payloads carry their own,
+independent `nVersion` field that starts at `1` (see each payload
+definition).
+
+Provider payload version `5` is reserved for shared-collateral semantics.
+Future protocol changes that affect the single-owner `ProRegTx` flow MUST
+use the next available provider payload version (`6` or later) rather than
+reusing `5` as a generic mode flag.
 
 | Name | Value | Description |
 | --- | ---: | --- |
@@ -211,16 +224,25 @@ new special transaction types.
 | `TRANSACTION_PROVIDER_UPDATE_SHARE` | 11 | `ProUpShareTx` payload (this DIP). |
 | `TRANSACTION_PROVIDER_UPDATE_SHARED_REGISTRAR` | 12 | `ProUpSharedRegTx` payload (this DIP). |
 
-The numeric assignments `10`, `11`, and `12` are tentative and MUST be the
-next three free DIP-0002 special transaction types at the time of merge. If
-another DIP claims any of these values first, this DIP is updated to use the
-next free values. The names (`PROVIDER_DISSOLVE`,
-`PROVIDER_UPDATE_SHARE`, `PROVIDER_UPDATE_SHARED_REGISTRAR`) are normative.
+The numeric assignments `10`, `11`, and `12` are tentative. Before this DIP
+is merged or activated, the assignments MUST be checked against the
+authoritative DIP-0002 registry and the current Dash Core
+`TRANSACTION_*` allocation in `primitives/transaction.h`. If any of these
+values is already consumed by another DIP or pending allocation at that
+time, this DIP MUST be updated to use the next free values. The names
+(`PROVIDER_DISSOLVE`, `PROVIDER_UPDATE_SHARE`,
+`PROVIDER_UPDATE_SHARED_REGISTRAR`) are normative; this DIP does not
+publish an authoritative table of unrelated special transaction type
+allocations.
 
 ProRegTx (type `1`) is reused at payload version 5 for shared registration.
-The base ProUpRegTx (type `3`) and ProUpServTx (type `2`) continue to operate
-under DIP-0003 rules for non-shared masternodes; both are forbidden for shared
-masternodes as specified in [Authorization Tiers](#authorization-tiers).
+The base `ProUpRegTx` (type `3`) is invalid against a v5 masternode and is
+unaffected for non-shared masternodes. The base `ProUpServTx` (type `2`)
+continues to operate under DIP-0003 / DIP-0028 rules for non-shared
+masternodes AND remains valid against a v5 masternode for the
+operator-authorized fields enumerated in [Authorization
+Tiers](#authorization-tiers); `ProUpServTx` MUST NOT attempt to modify any
+owner-controlled or shared-collateral field.
 
 ### Shared Collateral Output
 
@@ -280,6 +302,13 @@ constrained to the properties above; any implementation choice MUST be
 identical across all consensus implementations and MUST be encoded into the
 chain parameters used for activation. The DIP is amended with the assigned
 bytes before mainnet activation.
+
+This DIP is therefore NOT final for activation: it remains a Draft until
+the concrete `SHARED_COLLATERAL_SCRIPT` byte sequence is assigned and
+inserted here. The draft is suitable for review of the consensus rules and
+covenant model, but no implementation may treat the script as fixed until
+this section is updated with the assigned bytes (see [Open
+Issues](#open-issues)).
 
 Rationale: a P2SH anyone-can-spend template makes the script-level
 satisfaction trivial so that a valid `ProDisTx` can construct a sensible
@@ -407,6 +436,7 @@ sighash-mode behavior of the funding-input scripts.
 ```text
 SharedRegConsentHash = SHA256d(
     "DashSharedMNReg" ||
+    chainGenesisHash ||
     LE16(tx.nVersion)  || LE16(tx.nType)  || LE32(tx.nLockTime) ||
     inputsHash         || outputsHash     ||
     LE16(payload.nVersion) ||
@@ -430,6 +460,13 @@ Where:
 * `LE8`, `LE16`, `LE32`, `LE64` denote little-endian encodings of the
   indicated width.
 * `SHA256d(x)` is the Dash double-SHA-256 used for transaction hashes.
+* `chainGenesisHash` is the 32-byte block hash of the genesis block of the
+  network on which the registration is being authorized (mainnet, testnet,
+  devnet, regtest, or any future fork). Consensus uses the genesis hash of
+  the chain that is validating the transaction. Each participant signer
+  MUST independently verify the network / chain context of the
+  registration before producing `joinSig`; a signature produced against
+  one network's `chainGenesisHash` MUST NOT verify on any other network.
 * `inputsHash` is `CalcTxInputsHash(tx)`. Consensus MUST recompute this
   from the transaction and compare it to the `payload.inputsHash` field
   before signature verification; mismatch is invalid.
@@ -472,7 +509,7 @@ the only mutable per-share field is `rewardScript`.
 
 ```text
 CProUpShareTx {
-    nVersion     : uint16_t     // MUST be 5
+    nVersion     : uint16_t     // MUST be 1 (payload version of this new special tx type)
     proTxHash    : uint256
     shareIndex   : uint16_t     // index into shares[]
     newRewardScript : CScript
@@ -480,6 +517,11 @@ CProUpShareTx {
     sig          : vector<unsigned char>  // 65 bytes
 }
 ```
+
+`nVersion` here is the independent payload version of the new
+`TRANSACTION_PROVIDER_UPDATE_SHARE` special transaction; it is NOT the
+provider payload version `ProTxVersion::SharedCollateral = 5` of the v5
+`ProRegTx`. The two version namespaces are separate.
 
 Validation:
 
@@ -512,7 +554,7 @@ and `nOperatorReward`.
 
 ```text
 CProUpSharedRegTx {
-    nVersion        : uint16_t     // MUST be 5
+    nVersion        : uint16_t     // MUST be 1 (payload version of this new special tx type)
     proTxHash       : uint256
     pubKeyOperator  : CBLSPublicKey  // basic scheme
     keyIDVoting     : CKeyID
@@ -521,6 +563,10 @@ CProUpSharedRegTx {
     vchSigs         : vector<vector<unsigned char>>  // exactly shares.size() entries, in share order
 }
 ```
+
+As with `ProUpShareTx`, this `nVersion` is the independent payload version
+of the new `TRANSACTION_PROVIDER_UPDATE_SHARED_REGISTRAR` special
+transaction and is unrelated to `ProTxVersion::SharedCollateral = 5`.
 
 Validation:
 
@@ -633,7 +679,7 @@ output after activation. It is special transaction type
 
 ```text
 CProDisTx {
-    nVersion    : uint16_t   // MUST be 5
+    nVersion    : uint16_t   // MUST be 1 (payload version of this new special tx type)
     proTxHash   : uint256
     mode        : uint8_t    // 0 = unilateral, 1 = unanimous
     actorIndex  : uint16_t
@@ -642,6 +688,10 @@ CProDisTx {
     vchSigs     : vector<vector<unsigned char>>
 }
 ```
+
+`nVersion` here is the independent payload version of the new
+`TRANSACTION_PROVIDER_DISSOLVE` special transaction and is unrelated to
+`ProTxVersion::SharedCollateral = 5`.
 
 #### Transaction shape
 
@@ -660,6 +710,7 @@ A valid dissolution transaction satisfies all of:
 ```text
 SharedDisHash = SHA256d(
     "DashSharedMNDissolve" ||
+    chainGenesisHash ||
     LE16(tx.nVersion) || LE16(tx.nType) || LE32(tx.nLockTime) ||
     inputsHash || outputsHash ||
     LE16(payload.nVersion) ||
@@ -672,7 +723,14 @@ Where `inputsHash` is `CalcTxInputsHash(tx)` and `outputsHash` is the
 SHA-256d of the concatenated serialized outputs of `tx`, both recomputed
 from the actual transaction. Consensus MUST recompute both hashes and
 reject mismatches with the payload's `inputsHash` and `outputsHash`
-fields before any signature is verified.
+fields before any signature is verified. `chainGenesisHash` is the
+32-byte genesis block hash of the network validating the transaction,
+identical to its use in [Registration Consent
+Digest](#registration-consent-digest); a dissolution signed against one
+network's `chainGenesisHash` MUST NOT verify on any other. Each signer
+MUST independently verify the network / chain context before producing
+its `vchSigs` entry. `payload.nVersion` here is the dissolution payload
+version (currently `1`), not the v5 ProRegTx provider payload version.
 
 #### Period and penalty
 
@@ -920,9 +978,24 @@ continue to be created and removed as in DIP-0003.
 `CSimplifiedMNListEntry::CalcHash`, as used by DIP-0004 simplified
 masternode list verification, MUST NOT include shares, refund scripts,
 reward scripts, penalty parameters, or any other v5-only field. Light
-clients receive no SML commitment to shared-collateral metadata. This
-matches the treatment of payout metadata adopted by DIP-0026. Diagnostic
-RPCs and extended JSON output MAY expose v5 fields.
+clients receive no SML commitment to shared-collateral metadata.
+Diagnostic RPCs and extended JSON output MAY expose v5 fields.
+
+The trust boundary this creates is intentional and mirrors the
+direction DIP-0026 took for multi-payout metadata: shared-collateral
+fields are not committed to by SML hashes, so light clients cannot
+independently verify share amounts, refund scripts, reward scripts,
+penalty parameters, or any other v5-only field from an SML proof. A
+future extension to DIP-0004 would be required before SPV clients
+could verify shared-collateral terms without trusting a serving full
+node.
+
+Full nodes are unaffected by this boundary: a full node validates
+every v5 field from the deterministic masternode state that it
+reconstructs by replaying blocks, exactly as it does for pre-v5
+masternode state. The SML/filter limitation applies only to clients
+that depend on SML hashes or filter matches as their source of
+truth.
 
 Special-transaction and bloom filtering, as defined in DIP-0003 for
 `ProRegTx`/`ProUpRegTx` payout scripts, is extended for v5 masternodes:
@@ -934,6 +1007,12 @@ Special-transaction and bloom filtering, as defined in DIP-0003 for
 * For `ProUpSharedRegTx`, the filter MUST match `keyIDVoting`.
 * For `ProDisTx`, the filter MUST match every output's `scriptPubKey`,
   matching existing transaction-output filter semantics.
+
+These filter extensions exist solely for client-side discovery and
+relay; a filter match is NOT a consensus commitment to the matched
+data, and any light client that uses a filter match as authoritative
+evidence of v5 state still depends on the honesty of the serving full
+node.
 
 These filter extensions apply only to v5 special transactions after
 activation. Pre-v5 special transactions retain DIP-0003 filtering.
@@ -1339,15 +1418,19 @@ require the full node serving the client to be honest about v5 state.
 
 ### Replay across chains
 
-The registration consent digest and the dissolution authorization digest
-include the payload's `nVersion`, the transaction's `nVersion`,
-`nType`, and `nLockTime`, the recomputed `inputsHash` and `outputsHash`,
-and the masternode `proTxHash`. They do not include a chain identifier.
-Cross-chain replay protection relies on the existing Dash policy that
-chains use distinct genesis blocks and therefore distinct `proTxHash`
-values for any v5 registration. A future DIP MAY add an explicit chain
-identifier to these digests if cross-chain replay protection becomes a
-requirement.
+Both the registration consent digest and the dissolution authorization
+digest commit explicitly to `chainGenesisHash`, the genesis block hash of
+the network on which the transaction is being authorized. The consensus
+digest domain therefore includes the network's genesis hash, and any
+v5 registration or dissolution signed against one network's
+`chainGenesisHash` cannot be replayed onto any other network or fork
+because the digest verified by consensus on the target network would
+differ. Signers MUST verify the network / chain context (which genesis
+hash they are signing against) before producing any `joinSig` or
+dissolution signature; relying on `proTxHash` alone is insufficient for
+cross-chain replay protection because `proTxHash` collisions across
+networks or short-lived forks cannot be ruled out by digest construction
+alone and would otherwise expose unsuspecting signers to replay.
 
 ## Open Issues
 
@@ -1361,8 +1444,14 @@ before activation:
 2. **Final numeric values of `TRANSACTION_PROVIDER_DISSOLVE`,
    `TRANSACTION_PROVIDER_UPDATE_SHARE`, and
    `TRANSACTION_PROVIDER_UPDATE_SHARED_REGISTRAR`.** Tentatively
-   `10`, `11`, `12`. If another DIP claims any of these values
-   first, this DIP shifts to the next free values.
+   `10`, `11`, `12`. Before merge and before activation, these
+   assignments MUST be re-checked against the authoritative DIP-0002
+   registry and the live Dash Core `TRANSACTION_*` enum (as defined in
+   `primitives/transaction.h` on the targeted release branch). If any
+   value is already taken or pending allocation, this DIP MUST be
+   renumbered to the next free values rather than be merged with a
+   conflicting allocation. This DIP intentionally does not embed an
+   authoritative table of unrelated allocations.
 3. **Final value of `SHARED_MIN_SHARE_DUFFS`.** Tentatively
    `1000000000` (10 DASH). Subject to dust-policy review and
    feedback from wallet implementers.
