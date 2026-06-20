@@ -120,6 +120,8 @@ lowtopup
 nocredits
 nouser
 thresholdreached
+infinitedash
+johndoe
 
 # Names
 Akimov
@@ -163,3 +165,11 @@ Udjinm
 Virgile
 Westrich
 Wray
+ANYONECANPAY
+dissolvemasternode
+Serv
+SIGHASH
+sighash
+vout
+
+standardness

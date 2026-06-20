@@ -6,7 +6,7 @@
   Status: Draft
   Type: Standard
   Created: 2026-06-20
-  Requires: DIP-0002, DIP-0003, DIP-0023, DIP-0026
+  Requires: DIP-0002, DIP-0003, DIP-0023, DIP-0026, DIP-0028
   License: MIT License
 </pre>
 
@@ -109,8 +109,8 @@ future DIPs.
 ## Relationship to DIP-0026
 
 DIP-0026 introduces provider transaction payload version `4` (`MultiPayout`).
-Under DIP-0026 v4, the registrar owner remains the sole signer for ProRegTx
-and ProUpRegTx, and may freely rewrite the payout list at any time.
+Under DIP-0026 v4, the registrar owner remains the sole signer for ProRegTx and
+ProUpRegTx, and may freely rewrite the payout list at any time.
 
 This DIP does not modify DIP-0026 v4 semantics. Shared masternodes use a new
 provider transaction payload version, `5` (`SharedCollateral`), with the
@@ -154,18 +154,17 @@ v5 registration, and a shared masternode is wound down only by a valid
 | Constant | Value | Description |
 | --- | ---: | --- |
 | `SHARED_MIN_PARTICIPANTS` | 2 | Minimum number of shares. |
-| `SHARED_MAX_PARTICIPANTS` | 8 | Maximum number of shares, matching DIP-0026 payout-count limits. |
+| `SHARED_MAX_PARTICIPANTS` | 8 | Maximum number of shares. The limit is deliberately stricter than current legacy payout-list limits and is aligned with the pending DIP-0026 v4 design goal of bounding coinbase fan-out. |
 | `SHARED_MIN_SHARE_DUFFS` | 1000000000 (10 DASH) | Minimum value of any `shares[i].amount`. |
-| `SHARED_MAX_EARLY_PERIOD_BLOCKS` | 420480 (~2 years at nominal 2.5 min/block) | Maximum value of `earlyPeriodBlocks`. |
+| `SHARED_MAX_EARLY_PERIOD_BLOCKS` | 400305 (~2 years at 2.626 min/block) | Maximum value of `earlyPeriodBlocks`. |
 
-`SHARED_MAX_EARLY_PERIOD_BLOCKS` is given in blocks at Dash's nominal block
-interval of 2.5 minutes (150 s), yielding approximately
-`365 * 24 * 60 / 2.5 * 2 = 420480` blocks for a two-year ceiling. Realized block
-times vary, so the wall-clock equivalent drifts with hashrate; activation may
-refine this constant to the actual measured cap selected at deployment time.
+`SHARED_MAX_EARLY_PERIOD_BLOCKS` is given in blocks using Dash's measured
+long-run block interval estimate of 2.626 minutes, yielding approximately
+`365 * 24 * 60 / 2.626 * 2 = 400305` blocks for a two-year ceiling. Realized
+block times vary, so the wall-clock equivalent drifts with hashrate.
 Implementations and tooling that prefer a wall-clock interface SHOULD convert
-the user-facing value to blocks at the nominal 2.5 min/block rate and reject
-any input that exceeds `SHARED_MAX_EARLY_PERIOD_BLOCKS` once converted.
+the user-facing value to blocks at the 2.626 min/block rate and reject any input
+that exceeds `SHARED_MAX_EARLY_PERIOD_BLOCKS` once converted.
 
 `SHARED_MIN_SHARE_DUFFS` exists to keep recurring per-share coinbase outputs
 above policy dust thresholds at present block rewards while permitting modest
@@ -176,12 +175,17 @@ the future.
 Shared collateral amounts MUST satisfy:
 
 ```text
-sum(shares[i].amount) == GetMnType(nType).collat_amount
+for every i:
+    MoneyRange(shares[i].amount)
+    SHARED_MIN_SHARE_DUFFS <= shares[i].amount <= GetMnType(nType).collat_amount
+sum_overflow_safe(shares[i].amount) == GetMnType(nType).collat_amount
 ```
 
 where `GetMnType(nType).collat_amount` is 1000 DASH for `Regular` or 4000 DASH
-for `Evo`, as defined in DIP-0003 Appendix B and DIP-0028. A registration that
-does not exactly sum to the required collateral is invalid.
+for `Evo`, as defined in DIP-0003 Appendix B and DIP-0028. The sum MUST be
+computed with exact overflow-safe arithmetic; any overflow, non-`MoneyRange`
+share amount, share amount above the required collateral amount, or non-exact
+sum is invalid.
 
 Penalty parameters MUST satisfy:
 
@@ -213,27 +217,17 @@ transaction types introduced below; those payloads carry their own,
 independent `nVersion` field that starts at `1` (see each payload
 definition).
 
-Provider payload version `5` is reserved for shared-collateral semantics.
-Future protocol changes that affect the single-owner `ProRegTx` flow MUST
-use the next available provider payload version (`6` or later) rather than
-reusing `5` as a generic mode flag.
-
 | Name | Value | Description |
 | --- | ---: | --- |
 | `TRANSACTION_PROVIDER_DISSOLVE` | 10 | `ProDisTx` payload (this DIP). |
 | `TRANSACTION_PROVIDER_UPDATE_SHARE` | 11 | `ProUpShareTx` payload (this DIP). |
 | `TRANSACTION_PROVIDER_UPDATE_SHARED_REGISTRAR` | 12 | `ProUpSharedRegTx` payload (this DIP). |
 
-The numeric assignments `10`, `11`, and `12` are tentative. Before this DIP
-is merged or activated, the assignments MUST be checked against the
-authoritative DIP-0002 registry and the current Dash Core
-`TRANSACTION_*` allocation in `primitives/transaction.h`. If any of these
-values is already consumed by another DIP or pending allocation at that
-time, this DIP MUST be updated to use the next free values. The names
-(`PROVIDER_DISSOLVE`, `PROVIDER_UPDATE_SHARE`,
-`PROVIDER_UPDATE_SHARED_REGISTRAR`) are normative; this DIP does not
-publish an authoritative table of unrelated special transaction type
-allocations.
+Values `10`, `11`, and `12` are assigned by this DIP and are also registered in
+[DIP-0002's special transaction type table](dip-0002/special-transactions.md).
+If another accepted DIP consumes any of these values before this DIP is merged,
+this DIP MUST be updated to use the next free values before merge; it MUST NOT
+ship with conflicting type assignments.
 
 ProRegTx (type `1`) is reused at payload version 5 for shared registration.
 The base `ProUpRegTx` (type `3`) is invalid against a v5 masternode and is
@@ -266,7 +260,7 @@ The shared collateral output uses a single, fixed serialized script,
 3. It is recognizable by full nodes using a single template comparison, and
    it is recognizable as non-standard by older nodes that do not understand
    shared collateral.
-4. After activation, consensus protects two distinct classes of UTXOs:
+4. After activation, consensus and mempool policy protect the following shared collateral outpoint sets:
    * (a) **Active shared collateral outpoints** — outpoints recorded as
      the collateral of an active v5 masternode in the deterministic
      masternode list at the parent state of the block (or mempool tip)
@@ -283,56 +277,44 @@ The shared collateral output uses a single, fixed serialized script,
      a dissolution would consult. Dissolution of such a masternode is
      permitted only in a strictly later block, after the registration
      has been recorded in the deterministic masternode list.
+   * (c) **Mempool pending shared collateral outputs** — shared
+     collateral outputs created by an unconfirmed valid v5 ProRegTx in
+     the mempool. A mempool spend of an output in this class is rejected
+     unconditionally until the registration confirms.
    Rejection is enforced at mempool acceptance, at block connection, and
    during deterministic masternode list processing (see [Collateral
    Spend Enforcement](#collateral-spend-enforcement)).
 5. Ordinary UTXOs that happen to pay `SHARED_COLLATERAL_SCRIPT` but are
-   NOT in either protected class above are NOT bound by the dissolution
+   NOT in any protected class above are NOT bound by the dissolution
    covenant. They behave as ordinary outputs at script-evaluation time,
    subject to whatever spending conditions the recommended template
    imposes (for example, the `OP_TRUE` redeem-script template makes them
    anyone-can-spend). Implementations MUST NOT retroactively lock arbitrary
    pre-existing outputs or unrelated outputs created outside the v5
    registration flow.
-6. Before activation, miners and relays MUST treat any output with this
-   script as non-standard, so ordinary relay and mining policy discourages
-   creating such outputs before activation. After activation, the only way
-   for a transaction to register an outpoint into the protected set is a
-   valid v5 ProRegTx;
+6. Before activation, upgraded relays and miners MUST treat any output with
+   this script as non-standard and SHOULD NOT mine it, so ordinary relay and
+   mining policy discourages creating such outputs before activation. After
+   activation, the only way for a transaction to register an outpoint into the
+   protected set is a valid v5 ProRegTx;
    relay and mining policy MUST continue to treat any other output bearing
    `SHARED_COLLATERAL_SCRIPT` as non-standard to discourage accidental
    creation of stranded anyone-can-spend outputs.
 
-The recommended template is a P2SH of an `OP_TRUE`-equivalent redeem script,
-chosen so that the output is recognizable by template equality and so that no
-existing wallet would construct an equivalent output by accident. The exact
-bytes of `SHARED_COLLATERAL_SCRIPT` are assigned during implementation review,
-constrained to the properties above; any implementation choice MUST be
-identical across all consensus implementations and MUST be encoded into the
-chain parameters used for activation. The DIP is amended with the assigned
-bytes before mainnet activation.
+The shared collateral script is the single-byte script `OP_TRUE`:
 
-This DIP is therefore NOT final for activation. It remains a Draft until
-the concrete `SHARED_COLLATERAL_SCRIPT` byte sequence is assigned, the
-special transaction type numbers are confirmed against the live Dash
-Core allocation, and the DIP-0023 deployment parameters are assigned.
-The draft is suitable for review of the consensus rules and the
-covenant model, but no implementation may treat the script bytes or the
-deployment parameters as fixed until this section and [Open
-Issues](#open-issues) are updated with the assigned values. Critical
-consensus details that depend on those exact bytes (template equality
-checks, mempool / mining policy rejection, and chain-parameter
-encodings) MUST NOT be considered finalized in this revision.
+```text
+SHARED_COLLATERAL_SCRIPT = 0x51
+```
 
-Rationale: a P2SH anyone-can-spend template makes the script-level
-satisfaction trivial so that a valid `ProDisTx` can construct a sensible
-`scriptSig`, while consensus rules above script evaluation reject all
-spending paths except dissolution. Embedding per-masternode commitments
-(such as `proTxHash` or participant keys) into the output script was
-considered and rejected because it (i) would conflict with future
-relock-style updates of participant keys and (ii) would require either large
-output scripts or a separate commitment scheme that would still depend on
-deterministic masternode state to verify.
+This bare anyone-can-spend script is deliberately non-standard except when it
+appears as the collateral output of a valid v5 ProRegTx after activation.
+Script-level satisfaction is trivial, but consensus rules above script
+evaluation reject every protected spend except a valid `ProDisTx`. Embedding
+per-masternode commitments (such as `proTxHash` or participant keys) into the
+output script was considered and rejected because it would either conflict with
+future relock-style updates of participant keys or require a separate commitment
+scheme that would still depend on deterministic masternode state to verify.
 
 ### Collateral Share
 
@@ -342,7 +324,7 @@ CollateralShare {
     refundScript : CScript  (compact-size length-prefixed)
     rewardScript : CScript  (compact-size length-prefixed)
     ownerKey     : CKeyID   (20 bytes)
-    joinSig      : vector<unsigned char>  (compact-size length-prefixed, 65 bytes when present)
+    joinSig      : vector<unsigned char>  (compact-size length-prefixed, 65 bytes when present; CompactSize(0) in join-signature preimage)
 }
 ```
 
@@ -352,11 +334,12 @@ CollateralShare {
 | `refundScript` | Immutable | Set at registration; cannot be changed. |
 | `rewardScript` | Mutable per-share | Participant owner key of that share, via `ProUpShareTx`. |
 | `ownerKey` | Immutable | Set at registration; cannot be rotated in this DIP. |
-| `joinSig` | Set only in `ProRegTx` payload | Validated at registration; not stored in deterministic state. |
+| `joinSig` | Set only in `ProRegTx` payload | Validated at registration; not stored in deterministic state. In the registration join-signature digest, this field is serialized byte-exactly as an empty vector (`CompactSize(0)`), not omitted. |
 
 Field rules at registration:
 
-1. `amount` MUST be at least `SHARED_MIN_SHARE_DUFFS`.
+1. `amount` MUST satisfy `MoneyRange(amount)` and MUST be between
+   `SHARED_MIN_SHARE_DUFFS` and `GetMnType(nType).collat_amount`, inclusive.
 2. `refundScript` MUST be a standard `P2PKH` or `P2SH` script.
 3. `rewardScript` MUST be empty or a standard `P2PKH` or `P2SH` script. An
    empty `rewardScript` is interpreted at the consensus layer as
@@ -369,7 +352,9 @@ Field rules at registration:
    `shares[i].ownerKey` for v5 masternodes (see [Deterministic Masternode
    State](#deterministic-masternode-state)).
 6. `refundScript` MUST NOT be duplicated within the share table.
-7. `rewardScript` MAY be duplicated within the share table.
+7. Effective reward scripts MUST NOT be duplicated within the share table. For
+   this rule, an empty `rewardScript` is interpreted as `refundScript` before
+   duplicate detection.
 8. No `refundScript` and no `rewardScript` may be a P2PKH script paying to
    `keyIDOwner` (for v5 the field is absent — see below), `keyIDVoting`, or
    to a key ID that equals any `shares[i].ownerKey`. The intent matches
@@ -402,8 +387,8 @@ ProRegTx layout for `nVersion == 5`.
 | `earlyPeriodBlocks` | `uint32_t` | `0` to `SHARED_MAX_EARLY_PERIOD_BLOCKS`. |
 | `earlyPenalty` | `CAmount` (8 bytes) | Duffs. |
 | `standardPenalty` | `CAmount` (8 bytes) | Duffs. |
-| `platformNodeID`, ports (Evo only) | as DIP-0028 | As for v4. |
 | `inputsHash` | `uint256` | `CalcTxInputsHash(tx)`. |
+| `platformNodeID`, `platformNetInfo` (Evo only) | as DIP-0028 | Serialized after `inputsHash` and before `vchSig`, preserving the DIP-0028 insertion point. |
 | `vchSig` | `vector<unsigned char>` | MUST be empty for v5 (no external collateral signature). |
 
 There is no `keyIDOwner` field in a v5 ProRegTx. The role of the single owner
@@ -438,18 +423,22 @@ A v5 ProRegTx is invalid if any of the following conditions hold:
     `SHARED_MAX_PARTICIPANTS`.
 12. Any share fails its per-field validation rules in [Collateral
     Share](#collateral-share).
-13. `sum(shares[i].amount) != GetMnType(nType).collat_amount`.
-14. `nOperatorReward > 10000`.
-15. Penalty parameter constraints in [Parameters](#parameters) are not
+13. Any `shares[i].amount` fails `MoneyRange`, is less than
+    `SHARED_MIN_SHARE_DUFFS`, or is greater than
+    `GetMnType(nType).collat_amount`.
+14. The exact overflow-safe sum of all `shares[i].amount` values does not
+    equal `GetMnType(nType).collat_amount`, or the summation overflows.
+15. `nOperatorReward > 10000`.
+16. Penalty parameter constraints in [Parameters](#parameters) are not
     satisfied.
-16. `earlyPeriodBlocks > SHARED_MAX_EARLY_PERIOD_BLOCKS`.
-17. `vchSig` is non-empty.
-18. `inputsHash != CalcTxInputsHash(tx)`.
-19. For any share `i`, `shares[i].joinSig` does not verify against
+17. `earlyPeriodBlocks > SHARED_MAX_EARLY_PERIOD_BLOCKS`.
+18. `vchSig` is non-empty.
+19. `inputsHash != CalcTxInputsHash(tx)`.
+20. For any share `i`, `shares[i].joinSig` does not verify against
     `shares[i].ownerKey` over the registration consent digest defined
     below.
 
-Rules 17 and 18 are evaluated before any ECDSA signature verification.
+Rules 18 and 19 are evaluated before any ECDSA signature verification.
 Consensus computes `outputsHash` from the transaction outputs when building
 the registration consent digest; there is no payload `outputsHash` field in
 a v5 ProRegTx.
@@ -489,11 +478,12 @@ Where:
 * `SHA256d(x)` is the Dash double-SHA-256 used for transaction hashes.
 * `chainGenesisHash` is the 32-byte block hash of the genesis block of the
   network on which the registration is being authorized (mainnet, testnet,
-  devnet, regtest, or any future fork). Consensus uses the genesis hash of
-  the chain that is validating the transaction. Each participant signer
-  MUST independently verify the network / chain context of the
-  registration before producing `joinSig`; a signature produced against
-  one network's `chainGenesisHash` MUST NOT verify on any other network.
+  devnet, regtest, or any future network with a distinct genesis block).
+  Consensus uses the genesis hash of the chain that is validating the
+  transaction. Each participant signer MUST independently verify the
+  network / chain context of the registration before producing `joinSig`;
+  a signature produced against one `chainGenesisHash` MUST NOT verify on a
+  network with a different genesis hash.
 * `inputsHash` is `CalcTxInputsHash(tx)`. Consensus MUST recompute this
   from the transaction and compare it to the `payload.inputsHash` field
   before signature verification; mismatch is invalid.
@@ -512,8 +502,9 @@ Where:
 * `pubKeyOperatorSerialized` is the basic-scheme BLS public key
   serialization (48 bytes).
 * `sharesWithoutJoinSigs` is the concatenation of every `CollateralShare`
-  in share order with the `joinSig` field omitted (treated as a zero-length
-  byte string) so that signatures are not self-referential.
+  in share order, with each `joinSig` field serialized byte-exactly as an
+  empty vector (`CompactSize(0)`) so that signatures are not
+  self-referential. The field MUST NOT be omitted from the preimage.
 
 The domain separator `"DashSharedMNReg"` is the byte sequence of those
 ASCII characters with no trailing NUL.
@@ -544,7 +535,7 @@ CProUpShareTx {
     nVersion     : uint16_t     // MUST be 1 (payload version of this new special tx type)
     proTxHash    : uint256
     shareIndex   : uint16_t     // index into shares[]
-    newRewardScript : CScript
+    newRewardScript : CScript  // compact-size length-prefixed
     inputsHash   : uint256
     sig          : vector<unsigned char>  // 65 bytes
 }
@@ -557,35 +548,44 @@ provider payload version `ProTxVersion::SharedCollateral = 5` of the v5
 
 Validation:
 
-1. The masternode identified by `proTxHash` MUST exist and MUST be a v5
+1. `nVersion` MUST be `1`.
+2. The masternode identified by `proTxHash` MUST exist and MUST be a v5
    masternode.
-2. `shareIndex` MUST be less than `shares.size()` in the current state.
-3. `newRewardScript` MUST be empty or a standard `P2PKH` or `P2SH` script.
+3. `shareIndex` MUST be less than `shares.size()` in the current state.
+4. `newRewardScript` MUST be empty or a standard `P2PKH` or `P2SH` script.
    An empty `newRewardScript` is interpreted as
    `shares[shareIndex].refundScript`.
-4. `newRewardScript` MUST satisfy the same key-reuse restrictions as
+5. `newRewardScript` MUST satisfy the same key-reuse restrictions as
    registration: it MUST NOT be a P2PKH paying to any
    `shares[i].ownerKey` and MUST NOT pay to `keyIDVoting`.
-5. `inputsHash` MUST equal `CalcTxInputsHash(tx)`.
-6. `sig` MUST be a valid ECDSA compact signature by
+6. After interpreting an empty `newRewardScript` as
+   `shares[shareIndex].refundScript`, the resulting effective reward script
+   MUST NOT equal any other share's current effective reward script.
+7. `inputsHash` MUST equal `CalcTxInputsHash(tx)`.
+8. `sig` MUST be a valid ECDSA compact signature by
    `shares[shareIndex].ownerKey` over:
 
    ```text
    SHA256d("DashSharedMNUpShare" ||
            chainGenesisHash ||
            LE16(tx.nVersion) || LE16(tx.nType) || LE32(tx.nLockTime) ||
-           inputsHash ||
+           inputsHash || sequencesHash || outputsHash ||
            LE16(payload.nVersion) ||
-           proTxHash || LE16(shareIndex) || newRewardScript)
+           proTxHash || LE16(shareIndex) || newRewardScriptSerialized)
    ```
 
    `chainGenesisHash` is the 32-byte genesis block hash of the network
    validating the transaction. `payload.nVersion` is the ProUpShareTx payload
-   version (currently `1`).
+   version (currently `1`). `sequencesHash` and `outputsHash` use the same
+   definitions as in [Registration Consent Digest](#registration-consent-digest)
+   and are recomputed from the actual transaction before signature
+   verification. `newRewardScriptSerialized` is the standard compact-size
+   length-prefixed `CScript` serialization used in the payload.
 
 A valid `ProUpShareTx` replaces `shares[shareIndex].rewardScript` in the
 deterministic masternode state. It does not revive a PoSe-banned masternode
-and does not affect any other field.
+and does not affect any other field. Duplicate effective reward scripts are
+therefore invalid both at registration and after every per-share update.
 
 #### ProUpSharedRegTx (type 12)
 
@@ -611,25 +611,27 @@ transaction and is unrelated to `ProTxVersion::SharedCollateral = 5`.
 
 Validation:
 
-1. The masternode identified by `proTxHash` MUST exist and MUST be a v5
+1. `nVersion` MUST be `1`.
+2. The masternode identified by `proTxHash` MUST exist and MUST be a v5
    masternode.
-2. `pubKeyOperator` MUST be a valid basic-scheme BLS public key and MUST
+3. `pubKeyOperator` MUST be a valid basic-scheme BLS public key and MUST
    NOT collide with the operator key of any other registered masternode.
-3. `keyIDVoting` MUST NOT equal any `shares[i].ownerKey`.
-4. No current `refundScript` and no current effective `rewardScript` may be a
+4. `keyIDVoting` MUST be non-null and MUST NOT equal any
+   `shares[i].ownerKey`.
+5. No current `refundScript` and no current effective `rewardScript` may be a
    P2PKH script paying to `keyIDVoting`. For this check, an empty
    `rewardScript` is interpreted as the corresponding `refundScript`.
-5. `nOperatorReward <= 10000`.
-6. `inputsHash` MUST equal `CalcTxInputsHash(tx)`.
-7. `vchSigs.size()` MUST equal `shares.size()`.
-8. For each `i` in `[0, shares.size())`, `vchSigs[i]` MUST be a valid
+6. `nOperatorReward <= 10000`.
+7. `inputsHash` MUST equal `CalcTxInputsHash(tx)`.
+8. `vchSigs.size()` MUST equal `shares.size()`.
+9. For each `i` in `[0, shares.size())`, `vchSigs[i]` MUST be a valid
    ECDSA compact signature by `shares[i].ownerKey` over:
 
    ```text
    SHA256d("DashSharedMNUpSharedReg" ||
            chainGenesisHash ||
            LE16(tx.nVersion) || LE16(tx.nType) || LE32(tx.nLockTime) ||
-           inputsHash ||
+           inputsHash || sequencesHash || outputsHash ||
            LE16(payload.nVersion) ||
            proTxHash || pubKeyOperatorSerialized ||
            keyIDVoting || LE16(nOperatorReward))
@@ -637,17 +639,30 @@ Validation:
 
    `chainGenesisHash` is the 32-byte genesis block hash of the network
    validating the transaction. `payload.nVersion` is the ProUpSharedRegTx
-   payload version (currently `1`).
+   payload version (currently `1`). `sequencesHash` and `outputsHash` use the
+   same definitions as in [Registration Consent Digest](#registration-consent-digest)
+   and are recomputed from the actual transaction before signature
+   verification.
 
-9. Signature verification proceeds in share order. Any missing, extra, or
-   out-of-order signature is invalid.
+10. Signature verification proceeds in share order. Any missing, extra, or
+    out-of-order signature is invalid.
 
 A valid `ProUpSharedRegTx` replaces `pubKeyOperator`, `keyIDVoting`, and
 `nOperatorReward` in the deterministic masternode state. It does not revive
-a PoSe-banned masternode and does not affect share contents, collateral, or
-service fields. Operator-controlled fields (`scriptOperatorPayout`,
-`netInfo`, Platform identifiers) are unchanged by this transaction; they
-continue to be updated by the operator using `ProUpServTx`.
+a PoSe-banned masternode and does not affect share contents or collateral.
+
+If `pubKeyOperator` is unchanged, existing operator-controlled service fields
+(`scriptOperatorPayout`, `netInfo`, and Platform identifiers) are unchanged by
+this transaction and continue to be updated by the operator using
+`ProUpServTx`.
+
+If `pubKeyOperator` changes, all operator-controlled service fields MUST be
+reset: `scriptOperatorPayout` becomes empty, `netInfo` becomes the empty
+network-info value for the masternode's state version, Platform identifiers
+become null/empty, and the masternode is marked PoSe-banned until the new
+operator submits a valid `ProUpServTx`. This mirrors the existing
+operator-key-reset behavior for non-v5 masternodes and prevents stale
+operator payout or endpoint state from carrying across an operator change.
 
 ### Authorization Tiers
 
@@ -697,21 +712,16 @@ but weights by share amount rather than by basis points.
 DistributeByWeight(total, weights):
     sum_w = sum(weights)
     require sum_w > 0                            // reject all-zero weights
-    out[i] = floor(total * weights[i] / sum_w)   for each i
-    remainder = total - sum(out[i])
-    // remainder is distributed deterministically to indices with positive
-    // weights only, in ascending index order, one duff per such index,
-    // until exhausted. Indices with weight 0 are skipped so that no duff is
-    // ever credited to a zero-weight recipient.
-    for i in 0..weights.size():
-        if remainder == 0: break
-        if weights[i] == 0: continue
-        out[i] += 1
-        remainder -= 1
+    remainder_index = greatest i where weights[i] > 0
+    out[i] = floor(total * weights[i] / sum_w)   for each i != remainder_index
+    out[remainder_index] = total - sum(out[i] for i != remainder_index)
     return out
 ```
 
-`DistributeByWeight` is invalid for an all-zero weight vector and callers
+The final positive-weight entry receives the rounding remainder, matching the
+shape of DIP-0026's final-entry remainder rule while allowing weights to be
+collateral amounts rather than basis points. `DistributeByWeight` is invalid
+for an all-zero weight vector and callers
 MUST NOT invoke it in that case. All intermediate arithmetic in
 `DistributeByWeight`, including `total * weights[i]`, `sum_w`, and
 `sum(out[i])`, MUST be evaluated exactly without overflow. Implementations
@@ -755,14 +765,15 @@ CProDisTx {
 
 A valid dissolution transaction satisfies all of:
 
-1. It has exactly one input, and that input spends the shared collateral
+1. `nVersion` MUST be `1`.
+2. It has exactly one input, and that input spends the shared collateral
    outpoint of the masternode identified by `proTxHash`. No additional
    funding inputs are permitted in this initial scope.
-2. Its outputs are the refund outputs defined below, in share order, with
+3. Its outputs are the refund outputs defined below, in share order, with
    no additional outputs of any kind. Change outputs are not permitted.
-3. Its `nLockTime` MAY be non-zero. The dissolution authorization digest
+4. Its `nLockTime` MAY be non-zero. The dissolution authorization digest
    commits to `nLockTime`, so consensus enforces whatever value was signed.
-4. `mode` MUST be either `0` (unilateral) or `1` (unanimous). Any other
+5. `mode` MUST be either `0` (unilateral) or `1` (unanimous). Any other
    value is invalid.
 
 #### Authorization digest
@@ -787,14 +798,14 @@ the single dissolution input (`tx.vin[0].nSequence`) so that changing the
 sequence cannot disable or alter the signed `nLockTime` semantics.
 Consensus MUST recompute both hashes and reject mismatches with the
 payload's `inputsHash` and `outputsHash` fields before any signature is
-verified. `chainGenesisHash` is the
-32-byte genesis block hash of the network validating the transaction,
-identical to its use in [Registration Consent
-Digest](#registration-consent-digest); a dissolution signed against one
-network's `chainGenesisHash` MUST NOT verify on any other. Each signer
-MUST independently verify the network / chain context before producing
-its `vchSigs` entry. `payload.nVersion` here is the dissolution payload
-version (currently `1`), not the v5 ProRegTx provider payload version.
+verified. `chainGenesisHash` is the 32-byte genesis block hash of the
+network validating the transaction, identical to its use in [Registration
+Consent Digest](#registration-consent-digest); a dissolution signed against
+one `chainGenesisHash` MUST NOT verify on a network with a different
+genesis hash. Each signer MUST independently verify the network / chain
+context before producing its `vchSigs` entry. `payload.nVersion` here is
+the dissolution payload version (currently `1`), not the v5 ProRegTx
+provider payload version.
 
 #### Period and penalty
 
@@ -896,7 +907,7 @@ The difference between the spent shared collateral value and the sum of
 all outputs is the transaction fee:
 
 ```text
-fee = state.shared_collateral_value - sum(outputs.value)
+fee = GetMnType(state.nType).collat_amount - sum(outputs.value)
 ```
 
 Because every non-actor output is exact and the actor output is bounded
@@ -941,7 +952,7 @@ bears no special-transaction payload would, under DIP-0003 rules, simply
 remove the masternode by collateral spend. Implementations MUST also
 enforce the rules below outside `CheckSpecialTx`.
 
-The protected set has two parts with different rules:
+The protected set has three parts with different rules:
 
 * **Active set.** Every collateral outpoint recorded against an active
   v5 masternode in the deterministic masternode list at the parent of
@@ -956,6 +967,11 @@ The protected set has two parts with different rules:
   spends are rejected because the registration is not yet part of the
   parent deterministic state. Dissolution of such a masternode is
   permitted only in a strictly later block.
+* **Mempool pending set.** Every shared collateral outpoint created by
+  an unconfirmed v5 ProRegTx accepted into the mempool. A mempool
+  transaction that spends an outpoint in this set is rejected
+  unconditionally until the registration confirms and the outpoint moves
+  into the active set.
 
 A UTXO whose `scriptPubKey` equals `SHARED_COLLATERAL_SCRIPT` but whose
 outpoint is in neither set is NOT protected by the covenant and is not
@@ -968,9 +984,13 @@ match the template.
    mempool, scan its inputs. For each input that spends an outpoint in
    the active set, reject the transaction unless it is a valid
    `ProDisTx` for the masternode whose collateral outpoint matches the
-   spent outpoint in the current deterministic masternode list. The
-   same-block pending set is not consulted at mempool acceptance time;
-   it is computed per block by block-connection logic.
+   spent outpoint in the current deterministic masternode list. For
+   each input that spends an outpoint in the mempool pending set, reject
+   the transaction unconditionally, including if the transaction is a
+   `ProDisTx`. The same-block pending set is computed per block by
+   block-connection logic; the mempool pending set prevents miners from
+   assembling an invalid parent-plus-child package around an
+   unconfirmed v5 registration.
 2. **Block connection, prior blocks.** Before applying the deterministic
    masternode list update for a connected block, scan every non-coinbase
    transaction in that block for inputs that spend outpoints in the
@@ -1003,13 +1023,15 @@ match the template.
    deterministic.
 
 These rules are evaluated before script-level evaluation for inputs
-that spend outpoints in either protected set: even if the underlying
-redeem script is trivially satisfiable, consensus rejects the spend of
-an active-set outpoint unless the spend is a valid `ProDisTx` for the
-corresponding masternode, and rejects every spend of a same-block
-pending outpoint unconditionally. Spends of unprotected UTXOs that
-happen to bear the same script are not subjected to the covenant and
-are script-evaluated normally.
+that spend outpoints in the active set or same-block pending set: even
+if the underlying redeem script is trivially satisfiable, consensus
+rejects the spend of an active-set outpoint unless the spend is a valid
+`ProDisTx` for the corresponding masternode, and rejects every spend of
+a same-block pending outpoint unconditionally. Mempool policy likewise
+rejects every spend of a mempool-pending outpoint before script-level
+standardness or validity can make the child acceptable. Spends of
+unprotected UTXOs that happen to bear the same script are not subjected
+to the covenant and are script-evaluated normally.
 
 ### Deterministic Masternode State
 
@@ -1029,7 +1051,11 @@ extends the shared-collateral version family and defines its state encoding.
 | `standardPenalty` | `CAmount` | Frozen at registration. |
 
 The fields `scriptPayout` and `payouts` are unused for v5 masternodes and
-MUST be serialized as empty. `keyIDOwner` is unused for v5 masternodes.
+MUST be serialized as empty. `keyIDOwner` is absent from the v5 payload and
+MUST NOT participate in v5 validation or uniqueness indexes. If an
+implementation's deterministic state object contains a legacy `keyIDOwner`
+field, that field MUST be serialized as null/zero for v5 masternodes and MUST
+be ignored whenever `isSharedCollateral` is true.
 
 State diffs MUST be version-gated:
 
@@ -1092,13 +1118,12 @@ truth.
 Special-transaction and bloom filtering, as defined in DIP-0003 for
 `ProRegTx`/`ProUpRegTx` payout scripts, is extended for v5 masternodes:
 
-* For `ProRegTx` v5, the filter MUST match every `shares[i].refundScript`
-  and every non-empty `shares[i].rewardScript`, and every
-  `shares[i].ownerKey`.
-* For `ProUpShareTx`, the filter MUST match `newRewardScript`.
-* For `ProUpSharedRegTx`, the filter MUST match `keyIDVoting`.
-* For `ProDisTx`, the filter MUST match every output's `scriptPubKey`,
-  matching existing transaction-output filter semantics.
+| Transaction | Filter elements |
+| --- | --- |
+| `ProRegTx` v5 | Every `shares[i].refundScript`; every non-empty `shares[i].rewardScript`; every `shares[i].ownerKey`; `keyIDVoting`; `pubKeyOperator`; the shared collateral outpoint. |
+| `ProUpShareTx` | `proTxHash`; the current `shares[shareIndex].ownerKey`; `newRewardScript` when non-empty. |
+| `ProUpSharedRegTx` | `proTxHash`; every current `shares[i].ownerKey`; `keyIDVoting`; `pubKeyOperator`. |
+| `ProDisTx` | `proTxHash`; every signing participant owner key required by `mode`; every refund output `scriptPubKey`, matching existing transaction-output filter semantics. |
 
 These filter extensions exist solely for client-side discovery and
 relay; a filter match is NOT a consensus commitment to the matched
@@ -1111,26 +1136,29 @@ activation. Pre-v5 special transactions retain DIP-0003 filtering.
 
 ### Governance
 
-Dash governance assigns one vote per masternode, signed by the voting key
-recorded in deterministic masternode state. A v5 masternode retains one
-`keyIDVoting` and therefore one vote.
+A v5 masternode retains one `keyIDVoting`, signed by the voting key recorded
+in deterministic masternode state. This DIP does not introduce fractional
+participant voting or per-share governance keys.
+
+Vote weight remains defined by existing masternode-type rules. A shared
+`Regular` masternode has the regular masternode vote weight, while a shared
+`Evo` masternode retains the DIP-0028 evonode vote weight of four relative to
+a regular masternode. The single v5 `keyIDVoting` authorizes that whole
+masternode-type vote weight.
 
 `keyIDVoting` MAY be updated only by `ProUpSharedRegTx`, which requires
-unanimous participant signatures. There is no protocol-level mechanism
-for fractional voting among participants; any coordination of
-participant preferences for governance votes is off-chain and outside the
-scope of this DIP.
+unanimous participant signatures. There is no protocol-level mechanism for
+fractional voting among participants; any coordination of participant
+preferences for governance votes is off-chain and outside the scope of this
+DIP.
 
 ## Deployment and Compatibility
 
-**Draft status.** This DIP is a Draft. Activation parameters — the
-concrete byte sequence of `SHARED_COLLATERAL_SCRIPT`, the special
-transaction type numbers, and the DIP-0023 deployment name and
-signaling window — are NOT finalized in this revision. The consensus
-model and covenant rules below are written to be reviewable as a
-draft and MUST NOT be treated as activation-ready until those
-parameters are assigned and this DIP is updated accordingly (see
-[Open Issues](#open-issues)).
+**Draft status.** This DIP is a Draft. The DIP-0023 deployment name and
+signaling window are NOT finalized in this revision. The consensus model and
+covenant rules below are written to be reviewable as a draft and MUST NOT be
+treated as activation-ready until deployment parameters are assigned and this
+DIP is updated accordingly (see [Open Issues](#open-issues)).
 
 Activation of this DIP is gated by an intended future deployment
 defined under [DIP-0023](dip-0023.md). The exact deployment name and
@@ -1144,8 +1172,10 @@ Before activation:
 
 * Any provider transaction payload with `nVersion == 5` is invalid.
 * Special transaction types `10`, `11`, and `12` are invalid.
-* Any output with `SHARED_COLLATERAL_SCRIPT` is treated as non-standard
-  by relay and mining policy and MUST NOT be created on chain.
+* Upgraded relay and mining policy MUST treat any output with
+  `SHARED_COLLATERAL_SCRIPT` as non-standard and SHOULD NOT mine it.
+  Pre-activation consensus validity for such outputs is otherwise unchanged
+  unless a separate deployment says otherwise.
 
 After activation:
 
@@ -1281,32 +1311,30 @@ State](#deterministic-masternode-state)). A participant who wishes to
 exit immediately after registration can do so in the next block at no
 additional cost beyond standard fees.
 
-### One vote per masternode
+### One voting key per masternode
 
 Fractional governance would require either a new vote-aggregation
 scheme or a per-share signing tier on every governance message. Both are
-out of scope. Preserving the one-masternode-one-vote rule keeps shared
-masternodes compatible with the existing governance infrastructure and
-defers fractional voting to a future DIP.
+out of scope. Preserving one voting key per masternode while retaining
+existing masternode-type vote weights keeps shared masternodes compatible
+with the current governance infrastructure and defers fractional voting
+to a future DIP.
 
 ## Test Cases
 
-Implementations SHOULD include at minimum the following tests. Test
-values for `SHARED_COLLATERAL_SCRIPT` are taken from the activation
-chain parameters.
+Implementations SHOULD include at minimum the following tests.
 
 ### Helper
 
 1. `DistributeByWeight(10000, [2500, 2500, 2500, 2500])` returns
    `[2500, 2500, 2500, 2500]`.
 2. `DistributeByWeight(10001, [2500, 2500, 2500, 2500])` returns
-   `[2501, 2500, 2500, 2500]`.
+   `[2500, 2500, 2500, 2501]`.
 3. `DistributeByWeight(10, [0, 1, 1])` returns `[0, 5, 5]`.
-4. `DistributeByWeight(7, [1, 1, 1, 1, 1, 1, 1, 1])` returns one duff
-   to each of the first seven indices and zero to the eighth.
-5. `DistributeByWeight(3, [0, 1, 0, 1, 0])` returns `[0, 2, 0, 1, 0]`:
-   the remainder skips zero-weight indices and is credited only to
-   positive-weight indices in ascending order.
+4. `DistributeByWeight(7, [1, 1, 1, 1, 1, 1, 1, 1])` returns seven duffs
+   to the final index and zero to the other indices.
+5. `DistributeByWeight(3, [0, 1, 0, 1, 0])` returns `[0, 1, 0, 2, 0]`:
+   the final positive-weight index receives the remainder.
 6. `DistributeByWeight(5, [0, 0, 0])` is invalid (all-zero weights) and
    MUST be rejected by the helper.
 
@@ -1320,18 +1348,22 @@ chain parameters.
 4. A v5 ProRegTx with one share is invalid.
 5. A v5 ProRegTx with nine shares is invalid.
 6. A v5 ProRegTx whose share amounts sum to 999.99 DASH is invalid.
-7. A v5 ProRegTx with a duplicate participant owner key is invalid.
-8. A v5 ProRegTx with a duplicate refund script is invalid.
-9. A v5 ProRegTx with a refund script paying to a participant owner key
-   is invalid.
-10. A v5 ProRegTx whose collateral output uses a P2PKH script (not
-   `SHARED_COLLATERAL_SCRIPT`) is invalid.
-11. A v5 ProRegTx whose `vchSig` is non-empty is invalid.
-12. A v5 ProRegTx whose `joinSig` for share `i` was produced under a
+7. A v5 ProRegTx whose share summation overflows is invalid.
+8. A v5 ProRegTx with any individual share amount outside `MoneyRange` or
+   greater than `GetMnType(nType).collat_amount` is invalid.
+9. A v5 ProRegTx with a duplicate participant owner key is invalid.
+10. A v5 ProRegTx with a duplicate refund script is invalid.
+11. A v5 ProRegTx with duplicate effective reward scripts is invalid.
+12. A v5 ProRegTx with a refund script paying to a participant owner key
+    is invalid.
+13. A v5 ProRegTx whose collateral output uses a P2PKH script (not
+    `SHARED_COLLATERAL_SCRIPT`) is invalid.
+14. A v5 ProRegTx whose `vchSig` is non-empty is invalid.
+15. A v5 ProRegTx whose `joinSig` for share `i` was produced under a
     different `outputsHash` is invalid.
-13. A v5 ProRegTx whose `joinSig` for share `i` was produced under different
+16. A v5 ProRegTx whose `joinSig` for share `i` was produced under different
     input sequences is invalid.
-14. A v5 ProRegTx whose `joinSig` for share `i` was produced under a
+17. A v5 ProRegTx whose `joinSig` for share `i` was produced under a
     different penalty value is invalid.
 
 ### Reward Splitting
@@ -1355,19 +1387,32 @@ chain parameters.
    invalid.
 3. A `ProUpShareTx` setting `newRewardScript` to a P2PKH paying
    `shares[0].ownerKey` is invalid.
-4. A `ProUpSharedRegTx` with `vchSigs.size() == shares.size()`, signed
+4. A `ProUpShareTx` setting `newRewardScript` to another share's current
+   effective reward script is invalid.
+5. A `ProUpShareTx` whose signature was produced under different input
+   sequences or transaction outputs is invalid.
+6. A `ProUpShareTx` with `nVersion != 1` is invalid.
+7. A `ProUpSharedRegTx` with `vchSigs.size() == shares.size()`, signed
    by every share in order, updating `nOperatorReward` to a value no
    greater than 10000, is valid.
-5. A `ProUpSharedRegTx` setting `nOperatorReward > 10000` is invalid.
-6. A `ProUpSharedRegTx` setting `keyIDVoting` to a key hash already used by
-   any current refund script or effective reward script is invalid.
-7. A `ProUpSharedRegTx` missing one signature is invalid.
-8. A `ProUpSharedRegTx` with an extra signature is invalid.
-9. A `ProUpSharedRegTx` whose signatures are presented out of share
-   order is invalid.
-10. A `ProUpSharedRegTx` signature produced for another network's
+8. A `ProUpSharedRegTx` with `nVersion != 1` is invalid.
+9. A `ProUpSharedRegTx` setting `keyIDVoting` to null is invalid.
+10. A `ProUpSharedRegTx` setting `nOperatorReward > 10000` is invalid.
+11. A `ProUpSharedRegTx` setting `keyIDVoting` to a key hash already used by
+    any current refund script or effective reward script is invalid.
+12. A `ProUpSharedRegTx` whose signature was produced under different input
+    sequences or transaction outputs is invalid.
+13. A `ProUpSharedRegTx` missing one signature is invalid.
+14. A `ProUpSharedRegTx` with an extra signature is invalid.
+15. A `ProUpSharedRegTx` whose signatures are presented out of share
+    order is invalid.
+16. A `ProUpSharedRegTx` signature produced for another network's
     `chainGenesisHash` is invalid.
-11. A `ProUpRegTx` (type `3`) targeting a v5 masternode is invalid.
+17. A `ProUpSharedRegTx` that changes `pubKeyOperator` resets
+    `scriptOperatorPayout`, `netInfo`, and Platform identifiers and leaves the
+    masternode PoSe-banned until the new operator submits a valid
+    `ProUpServTx`.
+18. A `ProUpRegTx` (type `3`) targeting a v5 masternode is invalid.
 
 ### Dissolution
 
@@ -1378,54 +1423,55 @@ chain parameters.
    instead of `standardPenalty`.
 3. A unanimous `ProDisTx` with `shares.size()` signatures in share
    order and zero penalty is valid.
-4. A unilateral `ProDisTx` whose actor output exceeds
+4. A `ProDisTx` with `nVersion != 1` is invalid.
+5. A unilateral `ProDisTx` whose actor output exceeds
    `shares[a].amount - penalty` is invalid.
-5. A unilateral `ProDisTx` whose non-actor output `i` pays more or less
+6. A unilateral `ProDisTx` whose non-actor output `i` pays more or less
    than `shares[i].amount + bonus[i]` is invalid.
-6. A unilateral `ProDisTx` whose non-actor output `i` pays to a script
+7. A unilateral `ProDisTx` whose non-actor output `i` pays to a script
    other than `shares[i].refundScript` is invalid.
-7. A unilateral `ProDisTx` with an extra output (e.g. OP_RETURN) is
+8. A unilateral `ProDisTx` with an extra output (e.g. OP_RETURN) is
    invalid.
-8. A unilateral `ProDisTx` with an extra input is invalid.
-9. A unilateral `ProDisTx` whose actor output is omitted because the
+9. A unilateral `ProDisTx` with an extra input is invalid.
+10. A unilateral `ProDisTx` whose actor output is omitted because the
    fee equals `shares[a].amount - penalty` (so the actor remainder
    after the fee is zero) is valid, and its output list is the
    non-actor outputs in share order with no actor slot.
-10. A unilateral `ProDisTx` that includes an actor output paying zero
+11. A unilateral `ProDisTx` that includes an actor output paying zero
     duffs to `shares[a].refundScript` is invalid; the actor output MUST
     be omitted rather than paid as a zero-value output.
-11. A unanimous `ProDisTx` whose actor output is omitted (because the
+12. A unanimous `ProDisTx` whose actor output is omitted (because the
     fee equals `shares[a].amount`) is valid; every non-actor output
     pays exactly `shares[i].amount`.
-12. A unanimous `ProDisTx` missing one participant signature is
+13. A unanimous `ProDisTx` missing one participant signature is
     invalid.
-13. A `ProDisTx` with `mode` other than `0` or `1` is invalid.
-14. A `ProDisTx` whose input sequence is changed after signing is invalid,
+14. A `ProDisTx` with `mode` other than `0` or `1` is invalid.
+15. A `ProDisTx` whose input sequence is changed after signing is invalid,
     including when the sequence change would alter `nLockTime` behavior.
-15. A `ProDisTx` whose `outputsHash` does not match the recomputed
+16. A `ProDisTx` whose `outputsHash` does not match the recomputed
     transaction `outputsHash` is invalid; the signature check is not
     reached.
-16. A normal transaction (`nVersion < 3` or `nType == 0`) that spends
+17. A normal transaction (`nVersion < 3` or `nType == 0`) that spends
     the collateral outpoint of an active v5 masternode is rejected by
     mempool and by block validation.
-17. A non-dissolution special transaction whose input spends the
+18. A non-dissolution special transaction whose input spends the
     collateral outpoint of an active v5 masternode is rejected.
-18. A normal (non-`ProDisTx`) transaction later in the same block as a
+19. A normal (non-`ProDisTx`) transaction later in the same block as a
     v5 ProRegTx that spends the just-created shared collateral output
     is rejected at block connection.
-19. A unilateral `ProDisTx` for the same `proTxHash` in the same block
+20. A unilateral `ProDisTx` for the same `proTxHash` in the same block
     as the v5 ProRegTx that creates its shared collateral output is
     invalid, regardless of ordering within the block and regardless of
     whether every other covenant rule holds.
-20. A unanimous `ProDisTx` for the same `proTxHash` in the same block
+21. A unanimous `ProDisTx` for the same `proTxHash` in the same block
     as the v5 ProRegTx that creates its shared collateral output is
     invalid on the same basis as the unilateral case.
-21. A `ProDisTx` (unilateral or unanimous) that spends the shared
+22. A `ProDisTx` (unilateral or unanimous) that spends the shared
     collateral outpoint of a v5 masternode whose v5 ProRegTx was
     confirmed in a strictly earlier block, and that otherwise
     satisfies every covenant rule, is valid; the masternode is
     removed when this block is connected.
-22. An ordinary transaction whose input spends an unrelated UTXO that
+23. An ordinary transaction whose input spends an unrelated UTXO that
     happens to pay `SHARED_COLLATERAL_SCRIPT` but is NOT a recorded
     active shared collateral outpoint and is NOT a same-block pending
     shared collateral outpoint is NOT rejected by the covenant;
@@ -1561,42 +1607,30 @@ require the full node serving the client to be honest about v5 state.
 Both the registration consent digest and the dissolution authorization
 digest commit explicitly to `chainGenesisHash`, the genesis block hash of
 the network on which the transaction is being authorized. The consensus
-digest domain therefore includes the network's genesis hash, and any
-v5 registration or dissolution signed against one network's
-`chainGenesisHash` cannot be replayed onto any other network or fork
-because the digest verified by consensus on the target network would
-differ. Signers MUST verify the network / chain context (which genesis
-hash they are signing against) before producing any `joinSig` or
-dissolution signature; relying on `proTxHash` alone is insufficient for
-cross-chain replay protection because `proTxHash` collisions across
-networks or short-lived forks cannot be ruled out by digest construction
-alone and would otherwise expose unsuspecting signers to replay.
+digest domain therefore separates networks with different genesis hashes:
+a v5 registration or dissolution signed against one `chainGenesisHash`
+cannot be replayed onto a network with a different genesis hash because
+the digest verified by consensus on the target network would differ.
+
+This does not provide replay separation between forks or deployments that
+share the same genesis block. Signers MUST verify the intended network /
+chain context before producing any `joinSig` or dissolution signature, and
+implementations deploying v5 on same-genesis forks MUST add any additional
+fork-specific replay protection they require. Relying on `proTxHash` alone
+is insufficient for cross-chain replay protection because matching
+transaction and state context across networks cannot be ruled out by
+digest construction alone.
 
 ## Open Issues
 
 The following implementation details are deferred and MUST be resolved
 before activation:
 
-1. **Exact bytes of `SHARED_COLLATERAL_SCRIPT`.** The recommended
-   template family is a P2SH of an `OP_TRUE`-equivalent redeem
-   script. The chosen bytes are encoded into chain parameters and
-   included in this DIP before mainnet activation.
-2. **Final numeric values of `TRANSACTION_PROVIDER_DISSOLVE`,
-   `TRANSACTION_PROVIDER_UPDATE_SHARE`, and
-   `TRANSACTION_PROVIDER_UPDATE_SHARED_REGISTRAR`.** Tentatively
-   `10`, `11`, `12`. Before merge and before activation, these
-   assignments MUST be re-checked against the authoritative DIP-0002
-   registry and the live Dash Core `TRANSACTION_*` enum (as defined in
-   `primitives/transaction.h` on the targeted release branch). If any
-   value is already taken or pending allocation, this DIP MUST be
-   renumbered to the next free values rather than be merged with a
-   conflicting allocation. This DIP intentionally does not embed an
-   authoritative table of unrelated allocations.
-3. **Final value of `SHARED_MIN_SHARE_DUFFS`.** Tentatively
-   `1000000000` (10 DASH). Subject to dust-policy review and
-   feedback from wallet implementers.
-4. **Activation deployment name.** Subject to release engineering
-   confirmation that no candidate fork bit has already been consumed.
+1. **Final value of `SHARED_MIN_SHARE_DUFFS`.** Currently
+   `1000000000` (10 DASH). Subject to dust-policy review and feedback from
+   wallet implementers.
+2. **Activation deployment name.** Subject to release engineering confirmation
+   that no candidate fork bit has already been consumed.
 
 The following protocol-level extensions are out of scope for this DIP
 and may be addressed by future DIPs:
