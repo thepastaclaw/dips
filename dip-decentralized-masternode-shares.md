@@ -156,7 +156,16 @@ v5 registration, and a shared masternode is wound down only by a valid
 | `SHARED_MIN_PARTICIPANTS` | 2 | Minimum number of shares. |
 | `SHARED_MAX_PARTICIPANTS` | 8 | Maximum number of shares, matching DIP-0026 payout-count limits. |
 | `SHARED_MIN_SHARE_DUFFS` | 1000000000 (10 DASH) | Minimum value of any `shares[i].amount`. |
-| `SHARED_MAX_EARLY_PERIOD_BLOCKS` | 1051200 (~2 years at 60 s blocks) | Maximum value of `earlyPeriodBlocks`. |
+| `SHARED_MAX_EARLY_PERIOD_BLOCKS` | 420480 (~2 years at nominal 2.5 min/block) | Maximum value of `earlyPeriodBlocks`. |
+
+`SHARED_MAX_EARLY_PERIOD_BLOCKS` is given in blocks at Dash's nominal block
+interval of 2.5 minutes (150 s), yielding approximately
+`365 * 24 * 60 / 2.5 * 2 = 420480` blocks for a two-year ceiling. Realized block
+times vary, so the wall-clock equivalent drifts with hashrate; activation may
+refine this constant to the actual measured cap selected at deployment time.
+Implementations and tooling that prefer a wall-clock interface SHOULD convert
+the user-facing value to blocks at the nominal 2.5 min/block rate and reject
+any input that exceeds `SHARED_MAX_EARLY_PERIOD_BLOCKS` once converted.
 
 `SHARED_MIN_SHARE_DUFFS` exists to keep recurring per-share coinbase outputs
 above policy dust thresholds at present block rewards while permitting modest
@@ -223,27 +232,44 @@ The shared collateral output uses a single, fixed serialized script,
 `SHARED_COLLATERAL_SCRIPT`, with the following normative properties:
 
 1. It is a fixed byte sequence specified by this DIP; every shared collateral
-   output on every network uses the identical script bytes. The shared
-   collateral output is identified by script-template equality, not by
-   per-masternode commitments.
+   output on every network uses the identical script bytes. Script-template
+   equality is the registration-time selector used to identify which output
+   of a v5 ProRegTx is the shared collateral output; it is NOT, on its own,
+   the consensus identifier of a protected collateral.
 2. It contains no participant-specific data. In particular, it does not embed
    any participant owner key, refund script, reward script, share amount, or
-   `proTxHash`. The unique identity of a shared collateral output is its
-   outpoint; the per-masternode binding is provided by the deterministic
-   masternode state.
+   `proTxHash`. The per-masternode binding between an outpoint and a
+   `proTxHash` is provided by the deterministic masternode state, not by the
+   script itself.
 3. It is recognizable by full nodes using a single template comparison, and
    it is recognizable as non-standard by older nodes that do not understand
    shared collateral.
-4. After activation, consensus rejects every transaction that spends an
-   output bearing `SHARED_COLLATERAL_SCRIPT` unless the spend is a valid
-   `ProDisTx` for the masternode whose collateral outpoint matches the spent
-   outpoint. This rejection is enforced at the mempool acceptance layer, at
-   block connection, and during deterministic masternode list processing
-   (see [Collateral Spend Enforcement](#collateral-spend-enforcement)).
-5. Before activation, miners and relays MUST treat any output with this
+4. After activation, consensus protects **shared collateral outpoints** — the
+   set of UTXOs that are either (a) recorded as the collateral outpoint of an
+   active v5 masternode in the deterministic masternode list, or (b) created
+   by a valid v5 ProRegTx earlier in the same block currently being
+   validated. Any spend of an outpoint in this set is rejected unless the
+   spending transaction is a valid `ProDisTx` for the corresponding
+   masternode. Outpoints in this set are referred to below as
+   "active-or-pending shared collateral outpoints" and the rejection is
+   enforced at mempool acceptance, at block connection, and during
+   deterministic masternode list processing (see [Collateral Spend
+   Enforcement](#collateral-spend-enforcement)).
+5. Ordinary UTXOs that happen to pay `SHARED_COLLATERAL_SCRIPT` but are NOT
+   active-or-pending shared collateral outpoints are NOT bound by the
+   dissolution covenant. They behave as ordinary outputs at script-evaluation
+   time, subject to whatever spending conditions the recommended template
+   imposes (for example, the `OP_TRUE` redeem-script template makes them
+   anyone-can-spend). Implementations MUST NOT retroactively lock arbitrary
+   pre-existing outputs or unrelated outputs created outside the v5
+   registration flow.
+6. Before activation, miners and relays MUST treat any output with this
    script as non-standard, so it cannot be created on the live network in
-   advance of activation. After activation, only a v5 ProRegTx may create
-   an output with this script.
+   advance of activation. After activation, the only way for a transaction
+   to register an outpoint into the protected set is a valid v5 ProRegTx;
+   relay and mining policy MUST continue to treat any other output bearing
+   `SHARED_COLLATERAL_SCRIPT` as non-standard to discourage accidental
+   creation of stranded anyone-can-spend outputs.
 
 The recommended template is a P2SH of an `OP_TRUE`-equivalent redeem script,
 chosen so that the output is recognizable by template equality and so that no
@@ -569,16 +595,27 @@ but weights by share amount rather than by basis points.
 
 ```text
 DistributeByWeight(total, weights):
-    sum_w = sum(weights)             // MUST be > 0
+    sum_w = sum(weights)
+    require sum_w > 0                            // reject all-zero weights
     out[i] = floor(total * weights[i] / sum_w)   for each i
     remainder = total - sum(out[i])
-    // remainder is distributed in share order, one duff per index, until exhausted
+    // remainder is distributed deterministically to indices with positive
+    // weights only, in ascending index order, one duff per such index,
+    // until exhausted. Indices with weight 0 are skipped so that no duff is
+    // ever credited to a zero-weight recipient.
     for i in 0..weights.size():
         if remainder == 0: break
+        if weights[i] == 0: continue
         out[i] += 1
         remainder -= 1
     return out
 ```
+
+`DistributeByWeight` is invalid for an all-zero weight vector and callers
+MUST NOT invoke it in that case; for unanimous dissolution, where the
+penalty itself is zero, the bonus is taken to be all-zero directly without
+calling `DistributeByWeight` (see [Dissolution
+(ProDisTx)](#dissolution-prodistx)).
 
 Coinbase validation requires every expected per-share reward output by exact
 amount and script. As in DIP-0026, the relative order of outputs within the
@@ -666,34 +703,69 @@ For `mode == 1` (unanimous):
 
 #### Output covenant
 
-Let `a = actorIndex`, `N = shares.size()`, and `C =
-state.shares[i].amount` for the actor and non-actors. Define the
-non-actor bonus distribution:
+Let `a = actorIndex` and `N = shares.size()`. Define the non-actor bonus
+distribution:
 
 ```text
-weights[i] = (i == a) ? 0 : state.shares[i].amount
-bonus      = DistributeByWeight(penalty, weights)
+if mode == 1:
+    // unanimous: penalty is zero, bonus is trivially zero everywhere.
+    // DistributeByWeight is NOT invoked.
+    bonus[i] = 0 for all i in [0, N)
+else:
+    // unilateral: redistribute the penalty pro rata among non-actors.
+    // At least one non-actor weight is positive because N >= 2 and every
+    // share amount is positive, so sum_w > 0 and DistributeByWeight is
+    // well-defined.
+    weights[i] = (i == a) ? 0 : state.shares[i].amount
+    bonus      = DistributeByWeight(penalty, weights)
 ```
 
-The outputs of the dissolution transaction MUST be exactly, in order:
+Define the per-share dissolution value:
 
-* For each `i` in `[0, N)`:
-  * If `i != a`:
-    * Output `i` MUST pay exactly `state.shares[i].amount + bonus[i]`
-      to `state.shares[i].refundScript`.
-  * If `i == a`:
-    * Output `a` MUST pay to `state.shares[a].refundScript`.
-    * Its value MUST be at most
-      `state.shares[a].amount - penalty`.
-    * Its value MUST be non-negative.
+```text
+value[i] = (i == a) ? actorValue
+                    : state.shares[i].amount + bonus[i]
+```
 
-No other outputs of any kind are permitted. In particular, OP_RETURN
-outputs, change outputs, and operator outputs are not permitted.
+where `actorValue` is the value chosen by the constructor of the
+transaction, subject to:
 
-For `mode == 1` (unanimous), `penalty` is zero, so `bonus[i] == 0` for
-every `i`, each non-actor output pays exactly `state.shares[i].amount` to
-`state.shares[i].refundScript`, and the actor output pays at most
-`state.shares[a].amount`.
+```text
+0 <= actorValue <= state.shares[a].amount - penalty
+```
+
+The outputs of the dissolution transaction MUST be exactly, in order
+matching the share table with the actor slot optionally omitted:
+
+* Walk the share table in ascending `i` from `0` to `N - 1`. For each
+  `i`:
+  * If `i != a`, the transaction MUST contain the next output at this
+    position, paying exactly `state.shares[i].amount + bonus[i]` to
+    `state.shares[i].refundScript`.
+  * If `i == a` and `actorValue > 0`, the transaction MUST contain the
+    next output at this position, paying exactly `actorValue` to
+    `state.shares[a].refundScript`.
+  * If `i == a` and `actorValue == 0`, the actor's output MUST be
+    omitted entirely. No dust, OP_RETURN, or placeholder output stands
+    in for the actor.
+
+Non-actor outputs always appear in share order and are exact; the
+actor's output appears in its share-order slot when present and is
+absent otherwise. No outputs other than those defined above are
+permitted. In particular, OP_RETURN outputs, change outputs, and
+operator outputs are not permitted.
+
+Consensus matches outputs by walking the share table in share order and
+either consuming the next output (for non-actor slots and for the actor
+slot when present) or skipping the slot entirely (only for the actor
+when `actorValue` would be zero). Any deviation — extra output, missing
+non-actor output, wrong refund script, wrong amount, or a stray actor
+output when the value would be zero — is invalid.
+
+For `mode == 1` (unanimous), `penalty` is zero, every non-actor output
+pays exactly `state.shares[i].amount` to `state.shares[i].refundScript`,
+and the actor output pays `actorValue` with `0 <= actorValue <=
+state.shares[a].amount` (or is omitted when `actorValue == 0`).
 
 #### Fee accounting
 
@@ -733,35 +805,53 @@ until the corresponding `ProDisTx` has been validated.
 
 Provider transaction `CheckSpecialTx` validation alone is insufficient to
 enforce the shared collateral covenant: an ordinary transaction that
-spends the shared collateral output but bears no special-transaction
-payload would, under DIP-0003 rules, simply remove the masternode by
-collateral spend. Implementations MUST also enforce the rules below
-outside `CheckSpecialTx`.
+spends the shared collateral outpoint of an active v5 masternode but
+bears no special-transaction payload would, under DIP-0003 rules, simply
+remove the masternode by collateral spend. Implementations MUST also
+enforce the rules below outside `CheckSpecialTx`.
+
+The protected set is the set of **active-or-pending shared collateral
+outpoints**, defined as:
+
+* every collateral outpoint recorded against an active v5 masternode in
+  the deterministic masternode list at the parent of the block (or
+  mempool tip) being validated, plus
+* every collateral outpoint created by a valid v5 ProRegTx that has been
+  processed earlier in the block currently being validated and that has
+  not itself already been dissolved earlier in that block.
+
+A UTXO whose `scriptPubKey` equals `SHARED_COLLATERAL_SCRIPT` but whose
+outpoint is not in this set is NOT protected by the covenant and is not
+the subject of the rules below. The rules deliberately key off the
+recorded outpoint identity, not raw script equality, to avoid
+retroactively locking pre-existing or unrelated outputs that happen to
+match the template.
 
 1. **Mempool acceptance.** Before accepting any transaction into the
-   mempool, scan its inputs. For each input that spends an output in the
-   UTXO set bearing `SHARED_COLLATERAL_SCRIPT`, reject the transaction
-   unless it is a valid `ProDisTx` for the masternode identified by that
-   outpoint in the current deterministic masternode list.
+   mempool, scan its inputs. For each input that spends an
+   active-or-pending shared collateral outpoint, reject the transaction
+   unless it is a valid `ProDisTx` for the masternode whose collateral
+   outpoint matches the spent outpoint in the current deterministic
+   masternode list.
 2. **Block connection, prior blocks.** Before applying the deterministic
    masternode list update for a connected block, scan every non-coinbase
-   transaction in that block for inputs that spend outputs in the UTXO
-   set bearing `SHARED_COLLATERAL_SCRIPT`. Reject the block unless every
-   such input is the input of a valid `ProDisTx` for the matching
-   masternode.
-3. **Block connection, same-block.** Maintain a per-block index of shared
-   collateral outputs created by earlier transactions in the same block,
-   keyed by `(txid, vout, proTxHash)`. For every later non-coinbase
-   transaction in the same block, reject inputs that spend such outputs
-   unless the spending transaction is a valid `ProDisTx` referencing the
-   corresponding `proTxHash`. The matching `ProDisTx` MUST appear strictly
-   after the registration in the block ordering.
+   transaction in that block for inputs that spend collateral outpoints
+   of active v5 masternodes in the parent-state deterministic masternode
+   list. Reject the block unless every such input is the input of a
+   valid `ProDisTx` for the matching masternode.
+3. **Block connection, same-block.** Maintain a per-block index of
+   shared collateral outputs created by valid v5 ProRegTx earlier in the
+   same block, keyed by `(txid, vout, proTxHash)`. For every later
+   non-coinbase transaction in the same block, reject inputs that spend
+   such outputs unless the spending transaction is a valid `ProDisTx`
+   referencing the corresponding `proTxHash`. The matching `ProDisTx`
+   MUST appear strictly after the registration in the block ordering.
 4. **Deterministic masternode list removal.** Replace the
    "remove on collateral spend" rule from DIP-0003 with the following for
    v5 masternodes: a v5 masternode MUST NOT be removed until a
    corresponding valid `ProDisTx` for that `proTxHash` has been processed.
-   Any spend of the masternode's shared collateral output is otherwise
-   invalid.
+   Any spend of the masternode's shared collateral outpoint by a
+   transaction that is not such a `ProDisTx` is invalid.
 5. **Block disconnection and reorg.** Disconnecting a block that
    contained a `ProDisTx` MUST restore the v5 masternode entry to the
    exact pre-dissolution deterministic masternode state. State diffs MUST
@@ -770,10 +860,13 @@ outside `CheckSpecialTx`.
    State](#deterministic-masternode-state)) so that reorg replay is
    deterministic.
 
-These rules are evaluated before script-level evaluation: even if
-`SHARED_COLLATERAL_SCRIPT` is satisfied by a trivial witness, consensus
-rejects the spend unless it is a valid `ProDisTx` for the corresponding
-masternode.
+These rules are evaluated before script-level evaluation for inputs that
+spend active-or-pending shared collateral outpoints: even if the
+underlying redeem script is trivially satisfiable, consensus rejects the
+spend of a protected outpoint unless the spend is a valid `ProDisTx` for
+the corresponding masternode. Spends of unprotected UTXOs that happen to
+bear the same script are not subjected to the covenant and are
+script-evaluated normally.
 
 ### Deterministic Masternode State
 
@@ -971,10 +1064,15 @@ authorization digest therefore commits to the full transaction effect:
 ### Penalty bounds
 
 The strict `<` bounds on `earlyPenalty` and `standardPenalty` ensure
-that even the smallest participant retains a positive remainder after a
-unilateral exit. This bounds the worst-case griefing cost and avoids
-edge cases where the unilateral actor would have to produce a zero-value
-output that violates the output covenant.
+that even the smallest participant retains a positive remainder
+*before fees* after a unilateral exit, so that no consent flow can
+configure a penalty that exceeds the actor's principal. This bounds the
+worst-case griefing cost. The output covenant separately permits the
+actor's output to be omitted entirely when the transaction fee consumes
+the full pre-fee remainder, so the strict `<` rule on penalties is not
+required to keep the post-fee actor remainder positive; that flexibility
+exists so that the actor can cover an arbitrary fee at relay time
+without violating the covenant.
 
 ### Mempool and block enforcement
 
@@ -1015,6 +1113,11 @@ chain parameters.
 3. `DistributeByWeight(10, [0, 1, 1])` returns `[0, 5, 5]`.
 4. `DistributeByWeight(7, [1, 1, 1, 1, 1, 1, 1, 1])` returns one duff
    to each of the first seven indices and zero to the eighth.
+5. `DistributeByWeight(3, [0, 1, 0, 1, 0])` returns `[0, 2, 0, 1, 0]`:
+   the remainder skips zero-weight indices and is credited only to
+   positive-weight indices in ascending order.
+6. `DistributeByWeight(5, [0, 0, 0])` is invalid (all-zero weights) and
+   MUST be rejected by the helper.
 
 ### Registration
 
@@ -1084,18 +1187,34 @@ chain parameters.
 7. A unilateral `ProDisTx` with an extra output (e.g. OP_RETURN) is
    invalid.
 8. A unilateral `ProDisTx` with an extra input is invalid.
-9. A unanimous `ProDisTx` missing one participant signature is invalid.
-10. A `ProDisTx` whose `outputsHash` does not match the recomputed
+9. A unilateral `ProDisTx` whose actor output is omitted because the
+   fee equals `shares[a].amount - penalty` (so the actor remainder
+   after the fee is zero) is valid, and its output list is the
+   non-actor outputs in share order with no actor slot.
+10. A unilateral `ProDisTx` that includes an actor output paying zero
+    duffs to `shares[a].refundScript` is invalid; the actor output MUST
+    be omitted rather than paid as a zero-value output.
+11. A unanimous `ProDisTx` whose actor output is omitted (because the
+    fee equals `shares[a].amount`) is valid; every non-actor output
+    pays exactly `shares[i].amount`.
+12. A unanimous `ProDisTx` missing one participant signature is
+    invalid.
+13. A `ProDisTx` whose `outputsHash` does not match the recomputed
     transaction `outputsHash` is invalid; the signature check is not
     reached.
-11. A normal transaction (`nVersion < 3` or `nType == 0`) that spends a
-    shared collateral output is rejected by mempool and by block
-    validation.
-12. A non-dissolution special transaction whose input spends a shared
-    collateral output is rejected.
-13. A v5 ProRegTx and a unilateral `ProDisTx` for the same `proTxHash`
+14. A normal transaction (`nVersion < 3` or `nType == 0`) that spends
+    the collateral outpoint of an active v5 masternode is rejected by
+    mempool and by block validation.
+15. A non-dissolution special transaction whose input spends the
+    collateral outpoint of an active v5 masternode is rejected.
+16. A v5 ProRegTx and a unilateral `ProDisTx` for the same `proTxHash`
     in the same block, in that order, are accepted; the masternode is
     created and then removed within the block.
+17. An ordinary transaction whose input spends an unrelated UTXO that
+    happens to pay `SHARED_COLLATERAL_SCRIPT` but is NOT a recorded
+    active or same-block-pending shared collateral outpoint is NOT
+    rejected by the covenant; whether it succeeds depends only on
+    ordinary script evaluation of the underlying redeem script.
 
 ### Reorg
 
