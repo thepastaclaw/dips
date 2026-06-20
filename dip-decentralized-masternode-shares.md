@@ -396,7 +396,7 @@ ProRegTx layout for `nVersion == 5`.
 | `netInfo` | DIP-0003/0028 net info | As for v4. |
 | `pubKeyOperator` | BLS public key (basic scheme) | As for v4. |
 | `keyIDVoting` | `CKeyID` | As for v4. |
-| `nOperatorReward` | `uint16_t` | Basis points; as for v4. |
+| `nOperatorReward` | `uint16_t` | Basis points; MUST be from 0 to 10000. |
 | `shares` | `CollateralShare[]` | 2 to 8 entries; per [Collateral Share](#collateral-share). |
 | `earlyPeriodBlocks` | `uint32_t` | `0` to `SHARED_MAX_EARLY_PERIOD_BLOCKS`. |
 | `earlyPenalty` | `CAmount` (8 bytes) | Duffs. |
@@ -428,12 +428,13 @@ A v5 ProRegTx is invalid if any of the following conditions hold:
 9. Any share fails its per-field validation rules in [Collateral
    Share](#collateral-share).
 10. `sum(shares[i].amount) != GetMnType(nType).collat_amount`.
-11. Penalty parameter constraints in [Parameters](#parameters) are not
+11. `nOperatorReward > 10000`.
+12. Penalty parameter constraints in [Parameters](#parameters) are not
     satisfied.
-12. `earlyPeriodBlocks > SHARED_MAX_EARLY_PERIOD_BLOCKS`.
-13. `vchSig` is non-empty.
-14. `inputsHash != CalcTxInputsHash(tx)`.
-15. For any share `i`, `shares[i].joinSig` does not verify against
+13. `earlyPeriodBlocks > SHARED_MAX_EARLY_PERIOD_BLOCKS`.
+14. `vchSig` is non-empty.
+15. `inputsHash != CalcTxInputsHash(tx)`.
+16. For any share `i`, `shares[i].joinSig` does not verify against
     `shares[i].ownerKey` over the registration consent digest defined
     below.
 
@@ -589,9 +590,10 @@ Validation:
 2. `pubKeyOperator` MUST be a valid basic-scheme BLS public key and MUST
    NOT collide with the operator key of any other registered masternode.
 3. `keyIDVoting` MUST NOT equal any `shares[i].ownerKey`.
-4. `inputsHash` MUST equal `CalcTxInputsHash(tx)`.
-5. `vchSigs.size()` MUST equal `shares.size()`.
-6. For each `i` in `[0, shares.size())`, `vchSigs[i]` MUST be a valid
+4. `nOperatorReward <= 10000`.
+5. `inputsHash` MUST equal `CalcTxInputsHash(tx)`.
+6. `vchSigs.size()` MUST equal `shares.size()`.
+7. For each `i` in `[0, shares.size())`, `vchSigs[i]` MUST be a valid
    ECDSA compact signature by `shares[i].ownerKey` over:
 
    ```text
@@ -600,7 +602,7 @@ Validation:
            keyIDVoting || LE16(nOperatorReward) || inputsHash)
    ```
 
-7. Signature verification proceeds in share order. Any missing, extra, or
+8. Signature verification proceeds in share order. Any missing, extra, or
    out-of-order signature is invalid.
 
 A valid `ProUpSharedRegTx` replaces `pubKeyOperator`, `keyIDVoting`, and
@@ -726,6 +728,7 @@ SharedDisHash = SHA256d(
     "DashSharedMNDissolve" ||
     chainGenesisHash ||
     LE16(tx.nVersion) || LE16(tx.nType) || LE32(tx.nLockTime) ||
+    LE32(tx.vin[0].nSequence) ||
     inputsHash || outputsHash ||
     LE16(payload.nVersion) ||
     proTxHash ||
@@ -735,9 +738,12 @@ SharedDisHash = SHA256d(
 
 Where `inputsHash` is `CalcTxInputsHash(tx)` and `outputsHash` is the
 SHA-256d of the concatenated serialized outputs of `tx`, both recomputed
-from the actual transaction. Consensus MUST recompute both hashes and
-reject mismatches with the payload's `inputsHash` and `outputsHash`
-fields before any signature is verified. `chainGenesisHash` is the
+from the actual transaction. The digest also commits to the sequence of
+the single dissolution input (`tx.vin[0].nSequence`) so that changing the
+sequence cannot disable or alter the signed `nLockTime` semantics.
+Consensus MUST recompute both hashes and reject mismatches with the
+payload's `inputsHash` and `outputsHash` fields before any signature is
+verified. `chainGenesisHash` is the
 32-byte genesis block hash of the network validating the transaction,
 identical to its use in [Registration Consent
 Digest](#registration-consent-digest); a dissolution signed against one
@@ -1002,8 +1008,10 @@ Unique-property indexes MUST be extended:
   index used to reject reuse across masternodes at registration time.
   Pre-v5 masternodes contribute their single `keyIDOwner`; v5
   masternodes contribute every participant owner key.
-* The voting-key uniqueness index applies to `keyIDVoting` as in
-  DIP-0003.
+* No network-wide uniqueness index is added for `keyIDVoting`. As in
+  DIP-0003, the voting key may be delegated and reused; v5 validation only
+  forbids `keyIDVoting` from equaling any participant owner key for the same
+  masternode.
 * The operator-key uniqueness index applies to `pubKeyOperator` as in
   DIP-0003.
 
@@ -1262,19 +1270,20 @@ chain parameters.
    shares signed correctly, is valid.
 2. A v5 ProRegTx with eight shares summing to 1000 DASH, all signed, is
    valid.
-3. A v5 ProRegTx with one share is invalid.
-4. A v5 ProRegTx with nine shares is invalid.
-5. A v5 ProRegTx whose share amounts sum to 999.99 DASH is invalid.
-6. A v5 ProRegTx with a duplicate participant owner key is invalid.
-7. A v5 ProRegTx with a duplicate refund script is invalid.
-8. A v5 ProRegTx with a refund script paying to a participant owner key
+3. A v5 ProRegTx with `nOperatorReward > 10000` is invalid.
+4. A v5 ProRegTx with one share is invalid.
+5. A v5 ProRegTx with nine shares is invalid.
+6. A v5 ProRegTx whose share amounts sum to 999.99 DASH is invalid.
+7. A v5 ProRegTx with a duplicate participant owner key is invalid.
+8. A v5 ProRegTx with a duplicate refund script is invalid.
+9. A v5 ProRegTx with a refund script paying to a participant owner key
    is invalid.
-9. A v5 ProRegTx whose collateral output uses a P2PKH script (not
+10. A v5 ProRegTx whose collateral output uses a P2PKH script (not
    `SHARED_COLLATERAL_SCRIPT`) is invalid.
-10. A v5 ProRegTx whose `vchSig` is non-empty is invalid.
-11. A v5 ProRegTx whose `joinSig` for share `i` was produced under a
-    different `outputsHash` is invalid.
+11. A v5 ProRegTx whose `vchSig` is non-empty is invalid.
 12. A v5 ProRegTx whose `joinSig` for share `i` was produced under a
+    different `outputsHash` is invalid.
+13. A v5 ProRegTx whose `joinSig` for share `i` was produced under a
     different penalty value is invalid.
 
 ### Reward Splitting
@@ -1299,12 +1308,14 @@ chain parameters.
 3. A `ProUpShareTx` setting `newRewardScript` to a P2PKH paying
    `shares[0].ownerKey` is invalid.
 4. A `ProUpSharedRegTx` with `vchSigs.size() == shares.size()`, signed
-   by every share in order, updating `nOperatorReward`, is valid.
-5. A `ProUpSharedRegTx` missing one signature is invalid.
-6. A `ProUpSharedRegTx` with an extra signature is invalid.
-7. A `ProUpSharedRegTx` whose signatures are presented out of share
+   by every share in order, updating `nOperatorReward` to a value no
+   greater than 10000, is valid.
+5. A `ProUpSharedRegTx` setting `nOperatorReward > 10000` is invalid.
+6. A `ProUpSharedRegTx` missing one signature is invalid.
+7. A `ProUpSharedRegTx` with an extra signature is invalid.
+8. A `ProUpSharedRegTx` whose signatures are presented out of share
    order is invalid.
-8. A `ProUpRegTx` (type `3`) targeting a v5 masternode is invalid.
+9. A `ProUpRegTx` (type `3`) targeting a v5 masternode is invalid.
 
 ### Dissolution
 
@@ -1336,30 +1347,32 @@ chain parameters.
     pays exactly `shares[i].amount`.
 12. A unanimous `ProDisTx` missing one participant signature is
     invalid.
-13. A `ProDisTx` whose `outputsHash` does not match the recomputed
+13. A `ProDisTx` whose input sequence is changed after signing is invalid,
+    including when the sequence change would alter `nLockTime` behavior.
+14. A `ProDisTx` whose `outputsHash` does not match the recomputed
     transaction `outputsHash` is invalid; the signature check is not
     reached.
-14. A normal transaction (`nVersion < 3` or `nType == 0`) that spends
+15. A normal transaction (`nVersion < 3` or `nType == 0`) that spends
     the collateral outpoint of an active v5 masternode is rejected by
     mempool and by block validation.
-15. A non-dissolution special transaction whose input spends the
+16. A non-dissolution special transaction whose input spends the
     collateral outpoint of an active v5 masternode is rejected.
-16. A normal (non-`ProDisTx`) transaction later in the same block as a
+17. A normal (non-`ProDisTx`) transaction later in the same block as a
     v5 ProRegTx that spends the just-created shared collateral output
     is rejected at block connection.
-17. A unilateral `ProDisTx` for the same `proTxHash` in the same block
+18. A unilateral `ProDisTx` for the same `proTxHash` in the same block
     as the v5 ProRegTx that creates its shared collateral output is
     invalid, regardless of ordering within the block and regardless of
     whether every other covenant rule holds.
-18. A unanimous `ProDisTx` for the same `proTxHash` in the same block
+19. A unanimous `ProDisTx` for the same `proTxHash` in the same block
     as the v5 ProRegTx that creates its shared collateral output is
     invalid on the same basis as the unilateral case.
-19. A `ProDisTx` (unilateral or unanimous) that spends the shared
+20. A `ProDisTx` (unilateral or unanimous) that spends the shared
     collateral outpoint of a v5 masternode whose v5 ProRegTx was
     confirmed in a strictly earlier block, and that otherwise
     satisfies every covenant rule, is valid; the masternode is
     removed when this block is connected.
-20. An ordinary transaction whose input spends an unrelated UTXO that
+21. An ordinary transaction whose input spends an unrelated UTXO that
     happens to pay `SHARED_COLLATERAL_SCRIPT` but is NOT a recorded
     active shared collateral outpoint and is NOT a same-block pending
     shared collateral outpoint is NOT rejected by the covenant;
