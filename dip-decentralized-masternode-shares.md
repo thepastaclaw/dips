@@ -264,9 +264,10 @@ The shared collateral output uses a single, fixed serialized script,
    pre-existing outputs or unrelated outputs created outside the v5
    registration flow.
 6. Before activation, miners and relays MUST treat any output with this
-   script as non-standard, so it cannot be created on the live network in
-   advance of activation. After activation, the only way for a transaction
-   to register an outpoint into the protected set is a valid v5 ProRegTx;
+   script as non-standard, so ordinary relay and mining policy discourages
+   creating such outputs before activation. After activation, the only way
+   for a transaction to register an outpoint into the protected set is a
+   valid v5 ProRegTx;
    relay and mining policy MUST continue to treat any other output bearing
    `SHARED_COLLATERAL_SCRIPT` as non-standard to discourage accidental
    creation of stranded anyone-can-spend outputs.
