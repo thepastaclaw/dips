@@ -712,9 +712,14 @@ DistributeByWeight(total, weights):
 ```
 
 `DistributeByWeight` is invalid for an all-zero weight vector and callers
-MUST NOT invoke it in that case; for unanimous dissolution, where the
-penalty itself is zero, the bonus is taken to be all-zero directly without
-calling `DistributeByWeight` (see [Dissolution
+MUST NOT invoke it in that case. All intermediate arithmetic in
+`DistributeByWeight`, including `total * weights[i]`, `sum_w`, and
+`sum(out[i])`, MUST be evaluated exactly without overflow. Implementations
+MUST use at least 128-bit integer intermediates or a mathematically equivalent
+overflow-safe quotient/remainder algorithm that produces the same floor and
+remainder results for every consensus-valid input. For unanimous dissolution,
+where the penalty itself is zero, the bonus is taken to be all-zero directly
+without calling `DistributeByWeight` (see [Dissolution
 (ProDisTx)](#dissolution-prodistx)).
 
 Coinbase validation requires every expected per-share reward output by exact
