@@ -412,33 +412,43 @@ There is no `scriptPayout` or `payouts` field in a v5 ProRegTx. Owner rewards
 are derived directly from the share table as specified in [Reward
 Distribution](#reward-distribution).
 
+Unless explicitly replaced by this section, the base ProRegTx validation rules
+from DIP-0003, DIP-0026, and DIP-0028 continue to apply to v5 registrations.
+This includes network-info validation, Evo Platform-field validation,
+operator-key validity, and operator-key uniqueness.
+
 A v5 ProRegTx is invalid if any of the following conditions hold:
 
 1. `nVersion != 5`.
 2. `nType` is not `Regular` or `Evo`.
 3. `nMode != 0`.
-4. `collateralOutpoint.hash` is not the null hash.
-5. `collateralOutpoint.n` does not point to an output of this transaction.
-6. The output at `collateralOutpoint.n` does not pay
+4. `netInfo` fails the applicable DIP-0003 network-info validation rules.
+5. For Evo masternodes, any Platform field fails the applicable DIP-0028
+   validation rules.
+6. `pubKeyOperator` is not a valid basic-scheme BLS public key or collides
+   with the operator key of any other registered masternode.
+7. `collateralOutpoint.hash` is not the null hash.
+8. `collateralOutpoint.n` does not point to an output of this transaction.
+9. The output at `collateralOutpoint.n` does not pay
    `GetMnType(nType).collat_amount` to `SHARED_COLLATERAL_SCRIPT`.
-7. The transaction creates more than one output paying
-   `SHARED_COLLATERAL_SCRIPT`.
-8. `shares.size()` is less than `SHARED_MIN_PARTICIPANTS` or greater than
-   `SHARED_MAX_PARTICIPANTS`.
-9. Any share fails its per-field validation rules in [Collateral
-   Share](#collateral-share).
-10. `sum(shares[i].amount) != GetMnType(nType).collat_amount`.
-11. `nOperatorReward > 10000`.
-12. Penalty parameter constraints in [Parameters](#parameters) are not
+10. The transaction creates more than one output paying
+    `SHARED_COLLATERAL_SCRIPT`.
+11. `shares.size()` is less than `SHARED_MIN_PARTICIPANTS` or greater than
+    `SHARED_MAX_PARTICIPANTS`.
+12. Any share fails its per-field validation rules in [Collateral
+    Share](#collateral-share).
+13. `sum(shares[i].amount) != GetMnType(nType).collat_amount`.
+14. `nOperatorReward > 10000`.
+15. Penalty parameter constraints in [Parameters](#parameters) are not
     satisfied.
-13. `earlyPeriodBlocks > SHARED_MAX_EARLY_PERIOD_BLOCKS`.
-14. `vchSig` is non-empty.
-15. `inputsHash != CalcTxInputsHash(tx)`.
-16. For any share `i`, `shares[i].joinSig` does not verify against
+16. `earlyPeriodBlocks > SHARED_MAX_EARLY_PERIOD_BLOCKS`.
+17. `vchSig` is non-empty.
+18. `inputsHash != CalcTxInputsHash(tx)`.
+19. For any share `i`, `shares[i].joinSig` does not verify against
     `shares[i].ownerKey` over the registration consent digest defined
     below.
 
-Rules 14 and 15 are evaluated in order: `inputsHash` mismatch and the
+Rules 17 and 18 are evaluated in order: `inputsHash` mismatch and the
 recomputed `outputsHash` mismatch (see below) are checked before any
 ECDSA signature verification.
 
@@ -554,8 +564,16 @@ Validation:
 
    ```text
    SHA256d("DashSharedMNUpShare" ||
-           proTxHash || LE16(shareIndex) || newRewardScript || inputsHash)
+           chainGenesisHash ||
+           LE16(tx.nVersion) || LE16(tx.nType) || LE32(tx.nLockTime) ||
+           inputsHash ||
+           LE16(payload.nVersion) ||
+           proTxHash || LE16(shareIndex) || newRewardScript)
    ```
+
+   `chainGenesisHash` is the 32-byte genesis block hash of the network
+   validating the transaction. `payload.nVersion` is the ProUpShareTx payload
+   version (currently `1`).
 
 A valid `ProUpShareTx` replaces `shares[shareIndex].rewardScript` in the
 deterministic masternode state. It does not revive a PoSe-banned masternode
@@ -590,19 +608,30 @@ Validation:
 2. `pubKeyOperator` MUST be a valid basic-scheme BLS public key and MUST
    NOT collide with the operator key of any other registered masternode.
 3. `keyIDVoting` MUST NOT equal any `shares[i].ownerKey`.
-4. `nOperatorReward <= 10000`.
-5. `inputsHash` MUST equal `CalcTxInputsHash(tx)`.
-6. `vchSigs.size()` MUST equal `shares.size()`.
-7. For each `i` in `[0, shares.size())`, `vchSigs[i]` MUST be a valid
+4. No current `refundScript` and no current effective `rewardScript` may be a
+   P2PKH script paying to `keyIDVoting`. For this check, an empty
+   `rewardScript` is interpreted as the corresponding `refundScript`.
+5. `nOperatorReward <= 10000`.
+6. `inputsHash` MUST equal `CalcTxInputsHash(tx)`.
+7. `vchSigs.size()` MUST equal `shares.size()`.
+8. For each `i` in `[0, shares.size())`, `vchSigs[i]` MUST be a valid
    ECDSA compact signature by `shares[i].ownerKey` over:
 
    ```text
    SHA256d("DashSharedMNUpSharedReg" ||
+           chainGenesisHash ||
+           LE16(tx.nVersion) || LE16(tx.nType) || LE32(tx.nLockTime) ||
+           inputsHash ||
+           LE16(payload.nVersion) ||
            proTxHash || pubKeyOperatorSerialized ||
-           keyIDVoting || LE16(nOperatorReward) || inputsHash)
+           keyIDVoting || LE16(nOperatorReward))
    ```
 
-8. Signature verification proceeds in share order. Any missing, extra, or
+   `chainGenesisHash` is the 32-byte genesis block hash of the network
+   validating the transaction. `payload.nVersion` is the ProUpSharedRegTx
+   payload version (currently `1`).
+
+9. Signature verification proceeds in share order. Any missing, extra, or
    out-of-order signature is invalid.
 
 A valid `ProUpSharedRegTx` replaces `pubKeyOperator`, `keyIDVoting`, and
@@ -1311,11 +1340,15 @@ chain parameters.
    by every share in order, updating `nOperatorReward` to a value no
    greater than 10000, is valid.
 5. A `ProUpSharedRegTx` setting `nOperatorReward > 10000` is invalid.
-6. A `ProUpSharedRegTx` missing one signature is invalid.
-7. A `ProUpSharedRegTx` with an extra signature is invalid.
-8. A `ProUpSharedRegTx` whose signatures are presented out of share
+6. A `ProUpSharedRegTx` setting `keyIDVoting` to a key hash already used by
+   any current refund script or effective reward script is invalid.
+7. A `ProUpSharedRegTx` missing one signature is invalid.
+8. A `ProUpSharedRegTx` with an extra signature is invalid.
+9. A `ProUpSharedRegTx` whose signatures are presented out of share
    order is invalid.
-9. A `ProUpRegTx` (type `3`) targeting a v5 masternode is invalid.
+10. A `ProUpSharedRegTx` signature produced for another network's
+    `chainGenesisHash` is invalid.
+11. A `ProUpRegTx` (type `3`) targeting a v5 masternode is invalid.
 
 ### Dissolution
 
