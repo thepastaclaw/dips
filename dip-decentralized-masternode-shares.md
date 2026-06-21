@@ -220,7 +220,11 @@ discriminator field, `isSharedCollateral`. This DIP introduces three new
 special transaction types, each with its own independent payload version,
 to update and dissolve shared masternodes.
 
-The discriminator is a single `uint8_t` field in the v4 ProRegTx payload:
+The discriminator is a single `uint8_t` field in the v4 ProRegTx payload,
+serialized immediately after `nMode`. This wire position is a cross-DIP
+activation dependency: DIP-0026 v4 MUST reserve the same discriminator byte for
+all v4 ProRegTx payloads before this DIP can activate (see
+[Open Issues](#open-issues)).
 
 | Name | Type | Encoding |
 | --- | --- | --- |
@@ -229,11 +233,12 @@ The discriminator is a single `uint8_t` field in the v4 ProRegTx payload:
 The discriminator selects mutually exclusive variant fields in the same v4
 payload:
 
-* `isSharedCollateral == false`: the v4 payload follows the unchanged
-  DIP-0026 multi-payout layout (single `keyIDOwner`, `scriptPayout` /
-  `payouts`, no share table, no shared collateral output, no penalty
-  parameters, no `earlyPeriodBlocks`). All DIP-0026 v4 semantics, validation,
-  state, and authorization apply verbatim and are unaffected by this DIP.
+* `isSharedCollateral == false`: after the shared discriminator byte reserved
+  by DIP-0026 v4, the remaining v4 payload follows the unchanged DIP-0026
+  multi-payout layout (single `keyIDOwner`, `scriptPayout` / `payouts`, no
+  share table, no shared collateral output, no penalty parameters, no
+  `earlyPeriodBlocks`). All DIP-0026 v4 semantics, validation, state, and
+  authorization apply verbatim and are unaffected by this DIP.
 * `isSharedCollateral == true`: the v4 payload follows the shared-collateral
   layout defined in [Shared Registration (ProRegTx v4, shared
   mode)](#shared-registration-proregtx-v4-shared-mode) (no `keyIDOwner`, no
@@ -1327,10 +1332,11 @@ can advance the wire version without altering what "shared" means; new
 shared-mode variants can advance the discriminator without consuming
 provider payload version numbers.
 
-The discriminator also keeps the non-shared v4 layout unchanged: a v4
-ProRegTx with `isSharedCollateral == false` deserializes and validates
-exactly as DIP-0026 specifies, and the variant fields specific to
-shared mode appear only when the discriminator selects them.
+The discriminator also keeps the non-shared v4 variant unchanged after the
+shared discriminator byte that DIP-0026 v4 must reserve for all v4 ProRegTx
+payloads: a v4 ProRegTx with `isSharedCollateral == false` deserializes and
+validates exactly as DIP-0026 specifies after that byte, and the variant fields
+specific to shared mode appear only when the discriminator selects them.
 
 ### Internal collateral only
 
@@ -1796,7 +1802,12 @@ before activation:
    wallet implementers.
 2. **Activation deployment name.** Subject to release engineering confirmation
    that no candidate fork bit has already been consumed.
-3. **State-diff bit value for the share vector.** The exact bit position for
+3. **DIP-0026 v4 discriminator reservation.** DIP-0026 v4 MUST reserve the
+   `isSharedCollateral` discriminator byte immediately after `nMode` for every
+   v4 ProRegTx payload, including non-shared multi-payout registrations, before
+   this DIP can activate. Without that reservation, shared and non-shared v4
+   parsers would frame the same bytes differently.
+4. **State-diff bit value for the share vector.** The exact bit position for
    the shared-collateral share-vector full-replacement diff MUST be assigned
    before activation.
 
