@@ -261,12 +261,12 @@ The shared collateral output uses a single, fixed serialized script,
    it is recognizable as non-standard by older nodes that do not understand
    shared collateral.
 4. After activation, consensus and mempool policy protect the following shared collateral outpoint sets:
-   * (a) **Active shared collateral outpoints** — outpoints recorded as
-     the collateral of an active v5 masternode in the deterministic
+   * (a) **Registered shared collateral outpoints** — outpoints recorded
+     as the collateral of a registered v5 masternode in the deterministic
      masternode list at the parent state of the block (or mempool tip)
-     being validated. A spend of an outpoint in this class is rejected
-     unless the spending transaction is a valid `ProDisTx` for the
-     corresponding masternode.
+     being validated, including PoSe-banned entries that remain registered.
+     A spend of an outpoint in this class is rejected unless the spending
+     transaction is a valid `ProDisTx` for the corresponding masternode.
    * (b) **Same-block pending shared collateral outputs** — shared
      collateral outputs created by a valid v5 ProRegTx earlier in the
      block currently being validated. A spend of an output in this
@@ -947,18 +947,19 @@ until the corresponding `ProDisTx` has been validated.
 
 Provider transaction `CheckSpecialTx` validation alone is insufficient to
 enforce the shared collateral covenant: an ordinary transaction that
-spends the shared collateral outpoint of an active v5 masternode but
+spends the shared collateral outpoint of a registered v5 masternode but
 bears no special-transaction payload would, under DIP-0003 rules, simply
 remove the masternode by collateral spend. Implementations MUST also
 enforce the rules below outside `CheckSpecialTx`.
 
 The protected set has three parts with different rules:
 
-* **Active set.** Every collateral outpoint recorded against an active
-  v5 masternode in the deterministic masternode list at the parent of
-  the block (or mempool tip) being validated. A spend of an outpoint
-  in the active set is rejected unless it is a valid `ProDisTx` for
-  the matching masternode.
+* **Registered set.** Every collateral outpoint recorded against a
+  registered v5 masternode in the deterministic masternode list at the
+  parent of the block (or mempool tip) being validated, including
+  PoSe-banned entries that remain registered until removed by a valid
+  `ProDisTx`. A spend of an outpoint in the registered set is rejected
+  unless it is a valid `ProDisTx` for the matching masternode.
 * **Same-block pending set.** Every shared collateral outpoint created
   by a valid v5 ProRegTx earlier in the block currently being
   validated. A spend of an outpoint in the same-block pending set is
@@ -971,7 +972,7 @@ The protected set has three parts with different rules:
   an unconfirmed v5 ProRegTx accepted into the mempool. A mempool
   transaction that spends an outpoint in this set is rejected
   unconditionally until the registration confirms and the outpoint moves
-  into the active set.
+  into the registered set.
 
 A UTXO whose `scriptPubKey` equals `SHARED_COLLATERAL_SCRIPT` but whose
 outpoint is in neither set is NOT protected by the covenant and is not
@@ -982,7 +983,7 @@ match the template.
 
 1. **Mempool acceptance.** Before accepting any transaction into the
    mempool, scan its inputs. For each input that spends an outpoint in
-   the active set, reject the transaction unless it is a valid
+   the registered set, reject the transaction unless it is a valid
    `ProDisTx` for the masternode whose collateral outpoint matches the
    spent outpoint in the current deterministic masternode list. For
    each input that spends an outpoint in the mempool pending set, reject
@@ -994,8 +995,9 @@ match the template.
 2. **Block connection, prior blocks.** Before applying the deterministic
    masternode list update for a connected block, scan every non-coinbase
    transaction in that block for inputs that spend outpoints in the
-   active set (collateral outpoints of active v5 masternodes in the
-   parent-state deterministic masternode list). Reject the block unless
+   registered set (collateral outpoints of registered v5 masternodes,
+   including PoSe-banned entries, in the parent-state deterministic
+   masternode list). Reject the block unless
    every such input is the input of a valid `ProDisTx` for the matching
    masternode.
 3. **Block connection, same-block.** Maintain a per-block index of
@@ -1023,9 +1025,9 @@ match the template.
    deterministic.
 
 These rules are evaluated before script-level evaluation for inputs
-that spend outpoints in the active set or same-block pending set: even
+that spend outpoints in the registered set or same-block pending set: even
 if the underlying redeem script is trivially satisfiable, consensus
-rejects the spend of an active-set outpoint unless the spend is a valid
+rejects the spend of a registered-set outpoint unless the spend is a valid
 `ProDisTx` for the corresponding masternode, and rejects every spend of
 a same-block pending outpoint unconditionally. Mempool policy likewise
 rejects every spend of a mempool-pending outpoint before script-level
@@ -1452,10 +1454,11 @@ Implementations SHOULD include at minimum the following tests.
     transaction `outputsHash` is invalid; the signature check is not
     reached.
 17. A normal transaction (`nVersion < 3` or `nType == 0`) that spends
-    the collateral outpoint of an active v5 masternode is rejected by
-    mempool and by block validation.
+    the collateral outpoint of a registered v5 masternode, including a
+    PoSe-banned masternode that remains registered, is rejected by mempool
+    and by block validation.
 18. A non-dissolution special transaction whose input spends the
-    collateral outpoint of an active v5 masternode is rejected.
+    collateral outpoint of a registered v5 masternode is rejected.
 19. A normal (non-`ProDisTx`) transaction later in the same block as a
     v5 ProRegTx that spends the just-created shared collateral output
     is rejected at block connection.
@@ -1473,7 +1476,7 @@ Implementations SHOULD include at minimum the following tests.
     removed when this block is connected.
 23. An ordinary transaction whose input spends an unrelated UTXO that
     happens to pay `SHARED_COLLATERAL_SCRIPT` but is NOT a recorded
-    active shared collateral outpoint and is NOT a same-block pending
+    registered shared collateral outpoint and is NOT a same-block pending
     shared collateral outpoint is NOT rejected by the covenant;
     whether it succeeds depends only on ordinary script evaluation of
     the underlying redeem script.
