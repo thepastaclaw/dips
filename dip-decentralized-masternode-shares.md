@@ -1495,8 +1495,9 @@ Implementations SHOULD include at minimum the following tests.
    prior `rewardScript`.
 3. Disconnecting a block containing a `ProDisTx` restores the v5
    masternode entry with its full share state.
-4. A reorg that replays a `ProUpSharedRegTx` followed by a `ProDisTx`
-   in a different order produces the same final state.
+4. Disconnecting and reconnecting a chain segment that contains a
+   `ProUpSharedRegTx` followed later by a `ProDisTx` in the original
+   chain order produces the same final state.
 
 ## Implementation Notes
 
