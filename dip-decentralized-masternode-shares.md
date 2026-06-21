@@ -147,7 +147,7 @@ v5 registration, and a shared masternode is wound down only by a valid
 | Unilateral dissolution | A dissolution authorized by a single participant ("the actor") with a penalty redistributed to non-actors. |
 | Unanimous dissolution | A dissolution authorized by every participant with no penalty. |
 | Actor | The participant chosen by `actorIndex` who pays the transaction fee and, in unilateral mode, the penalty. |
-| Early period | The window of `earlyPeriodBlocks` blocks after registration during which `earlyPenalty` applies to unilateral dissolution. |
+| Early period | The first `earlyPeriodBlocks` eligible dissolution blocks after registration during which `earlyPenalty` applies to unilateral dissolution. Same-block dissolution is not eligible; if `earlyPeriodBlocks == 0`, no block is early. |
 
 ### Parameters
 
@@ -814,9 +814,15 @@ Let `H` be the height at which the dissolution is connected, and let
 block of `H`. Define:
 
 ```text
-early   = (H - state.nRegisteredHeight) < state.earlyPeriodBlocks
+early   = (state.earlyPeriodBlocks > 0) &&
+          ((H - state.nRegisteredHeight) <= state.earlyPeriodBlocks)
 penalty = (mode == 1) ? 0 : (early ? state.earlyPenalty : state.standardPenalty)
 ```
+
+Because same-block dissolution is invalid, the first eligible dissolution
+height is `state.nRegisteredHeight + 1`. Therefore `earlyPeriodBlocks == 1`
+means only that first eligible block uses `earlyPenalty`, and
+`earlyPeriodBlocks == 0` disables the early penalty window.
 
 #### Signature cardinality
 
