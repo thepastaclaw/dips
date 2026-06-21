@@ -19,10 +19,10 @@
 5. [Specification](#specification)
     1. [Terminology](#terminology)
     2. [Parameters](#parameters)
-    3. [Provider Transaction Version](#provider-transaction-version)
+    3. [Shared-Collateral Mode Discriminator](#shared-collateral-mode-discriminator)
     4. [Shared Collateral Output](#shared-collateral-output)
     5. [Collateral Share](#collateral-share)
-    6. [Shared Registration (ProRegTx v5)](#shared-registration-proregtx-v5)
+    6. [Shared Registration (ProRegTx v4, shared mode)](#shared-registration-proregtx-v4-shared-mode)
     7. [Registration Consent Digest](#registration-consent-digest)
     8. [Shared Update Transactions](#shared-update-transactions)
     9. [Authorization Tiers](#authorization-tiers)
@@ -43,24 +43,28 @@
 ## Abstract
 
 This DIP extends [DIP-0003: Deterministic Masternode Lists](dip-0003.md) by
-defining a new provider transaction payload version, `SharedCollateral` (`5`),
-that allows between 2 and 8 mutually distrusting participants to jointly fund,
-operate, and exit a single Regular or Evolution masternode under
-protocol-enforced consent. The shared masternode is funded by an internal
-collateral output that is locked by consensus to a dissolution covenant. Owner
-rewards are split natively in the coinbase by recorded share amounts. Each
-participant may unilaterally dissolve the masternode at any time, subject to a
-participant-chosen penalty and the standard transaction fee, and the full set of
-participants may dissolve unanimously with no penalty. Updates to fields that
-affect all participants require consent from every participant; the operator
-role remains unchanged.
+defining a **shared-collateral mode** within the existing DIP-0026 v4 provider
+transaction payload, selected by an explicit `isSharedCollateral` discriminator
+flag. In shared-collateral mode, between 2 and 8 mutually distrusting
+participants jointly fund, operate, and exit a single Regular or Evolution
+masternode under protocol-enforced consent. The shared masternode is funded by
+an internal collateral output that is locked by consensus to a dissolution
+covenant. Owner rewards are split natively in the coinbase by recorded share
+amounts. Each participant may unilaterally dissolve the masternode at any time,
+subject to a participant-chosen penalty and the standard transaction fee, and
+the full set of participants may dissolve unanimously with no penalty. Updates
+to fields that affect all participants require consent from every participant;
+the operator role remains unchanged.
 
 Shared collateral is a strict superset of the [DIP-0026: Multi-Party
-Payouts](dip-0026.md) reward-splitting mechanism. DIP-0026 leaves the
-registrar owner in unilateral control of the payout list. This DIP introduces
-a separate provider payload version so that share amounts, refund destinations,
-and the collateral itself are bound to per-participant consent and cannot be
-redirected by any single owner, operator, miner, or compromised update path.
+Payouts](dip-0026.md) reward-splitting mechanism. DIP-0026 v4 with
+`isSharedCollateral == false` leaves the registrar owner in unilateral control
+of the payout list and is unchanged by this DIP. This DIP introduces the
+shared-collateral discriminator into the same v4 payload version so that, when
+the discriminator is true, share amounts, refund destinations, and the
+collateral itself are bound to per-participant consent and cannot be redirected
+by any single owner, operator, miner, or compromised update path. No new
+ProRegTx provider payload version is reserved.
 
 ## Motivation
 
@@ -109,14 +113,15 @@ future DIPs.
 ## Relationship to DIP-0026
 
 DIP-0026 introduces provider transaction payload version `4` (`MultiPayout`).
-Under DIP-0026 v4, the registrar owner remains the sole signer for ProRegTx and
-ProUpRegTx, and may freely rewrite the payout list at any time.
+Under DIP-0026 v4 with `isSharedCollateral == false`, the registrar owner
+remains the sole signer for ProRegTx and ProUpRegTx, and may freely rewrite
+the payout list at any time.
 
-This DIP does not modify DIP-0026 v4 semantics. Shared masternodes use a new
-provider transaction payload version, `5` (`SharedCollateral`), with the
-following distinctions:
+This DIP does not modify DIP-0026 v4 non-shared semantics. Shared masternodes
+reuse the same v4 provider transaction payload version with
+`isSharedCollateral == true`, with the following distinctions:
 
-| Property | DIP-0026 v4 | This DIP, v5 |
+| Property | v4, `isSharedCollateral == false` (DIP-0026) | v4, `isSharedCollateral == true` (this DIP) |
 | --- | --- | --- |
 | Ownership model | Single registrar owner | 2 to 8 participants |
 | Payout list authority | Registrar owner via ProUpRegTx | Per-share self-update; share amounts immutable |
@@ -125,11 +130,17 @@ following distinctions:
 | Voting / operator updates | Owner | Unanimous participant consent |
 | Refund on exit | None enforced | Per-participant refund script enforced |
 
-A v5 payload MUST NOT be reinterpreted as a v4 payload, and a v4 payload MUST
-NOT be reinterpreted as v5. A single-owner masternode using v3 or v4 cannot
-be upgraded to v5 in place: shared collateral is established only by a new
-v5 registration, and a shared masternode is wound down only by a valid
-`ProDisTx`. There is no in-place downgrade from v5 to v3 or v4.
+The two modes share `nVersion == 4` but are not interchangeable on the wire:
+the discriminator selects mutually exclusive variant fields (see
+[Shared-Collateral Mode Discriminator](#shared-collateral-mode-discriminator)),
+so a payload serialized with `isSharedCollateral == true` MUST NOT be
+reinterpreted as a non-shared v4 payload, and a non-shared v4 payload MUST NOT
+be reinterpreted as shared. A single-owner masternode using v3 or non-shared
+v4 cannot be converted to shared in place: shared collateral is established
+only by a new v4 registration with `isSharedCollateral == true`, and a shared
+masternode is wound down only by a valid `ProDisTx`. There is no in-place
+conversion from a shared v4 masternode back to a non-shared v3 or v4
+masternode.
 
 ## Specification
 
@@ -200,22 +211,52 @@ for the unilateral actor after the penalty is paid, so a unilateral
 dissolution by any participant always returns a non-zero amount to the actor
 before fees.
 
-### Provider Transaction Version
+### Shared-Collateral Mode Discriminator
 
-This DIP introduces one new ProRegTx payload version and three new special
-transaction types, each with its own independent payload version.
+This DIP does NOT introduce a new ProRegTx provider payload version.
+Shared-collateral registration reuses the existing DIP-0026 v4 ProRegTx
+(`nVersion == 4`) and selects shared-collateral semantics by an explicit
+discriminator field, `isSharedCollateral`. This DIP introduces three new
+special transaction types, each with its own independent payload version,
+to update and dissolve shared masternodes.
 
-| Name | Value | Applies to |
-| --- | ---: | --- |
-| `ProTxVersion::SharedCollateral` | 5 | `ProRegTx` payload version for shared-collateral registration and the corresponding shared masternode state. |
+The discriminator is a single `uint8_t` field in the v4 ProRegTx payload:
 
-`ProTxVersion::SharedCollateral = 5` is the provider transaction payload
-version of a v5 `ProRegTx` and is also the version tag carried in the
-deterministic masternode state for masternodes registered by such a
-transaction. It does NOT apply as the payload version of the new special
+| Name | Type | Encoding |
+| --- | --- | --- |
+| `isSharedCollateral` | `uint8_t` | `0x00` for non-shared (DIP-0026 multi-payout) mode; `0x01` for shared-collateral mode. Any other value is invalid. |
+
+The discriminator selects mutually exclusive variant fields in the same v4
+payload:
+
+* `isSharedCollateral == false`: the v4 payload follows the unchanged
+  DIP-0026 multi-payout layout (single `keyIDOwner`, `scriptPayout` /
+  `payouts`, no share table, no shared collateral output, no penalty
+  parameters, no `earlyPeriodBlocks`). All DIP-0026 v4 semantics, validation,
+  state, and authorization apply verbatim and are unaffected by this DIP.
+* `isSharedCollateral == true`: the v4 payload follows the shared-collateral
+  layout defined in [Shared Registration (ProRegTx v4, shared
+  mode)](#shared-registration-proregtx-v4-shared-mode) (no `keyIDOwner`, no
+  `scriptPayout`, no `payouts`, a `CollateralShare[]` table, an internal
+  collateral output that pays `SHARED_COLLATERAL_SCRIPT`, and per-masternode
+  penalty parameters). The shared-collateral variant is selected solely by
+  the discriminator; consensus MUST NOT infer the variant from any other
+  field length, script shape, or output count.
+
+The discriminator is the mode tag carried in the deterministic masternode
+state: a masternode created by a v4 ProRegTx with `isSharedCollateral == true`
+carries `state.isSharedCollateral == true` for the rest of its lifetime, and
+all shared-collateral state fields and authorization rules in this DIP gate on
+that flag. A masternode created by a v4 ProRegTx with
+`isSharedCollateral == false` carries `state.isSharedCollateral == false` and
+is governed by DIP-0026.
+
+The discriminator does NOT apply as the payload version of the new special
 transaction types introduced below; those payloads carry their own,
 independent `nVersion` field that starts at `1` (see each payload
-definition).
+definition). The independent payload versions of `ProDisTx`,
+`ProUpShareTx`, and `ProUpSharedRegTx` evolve separately from the v4
+ProRegTx payload version.
 
 | Name | Value | Description |
 | --- | ---: | --- |
@@ -229,11 +270,12 @@ If another accepted DIP consumes any of these values before this DIP is merged,
 this DIP MUST be updated to use the next free values before merge; it MUST NOT
 ship with conflicting type assignments.
 
-ProRegTx (type `1`) is reused at payload version 5 for shared registration.
-The base `ProUpRegTx` (type `3`) is invalid against a v5 masternode and is
-unaffected for non-shared masternodes. The base `ProUpServTx` (type `2`)
-continues to operate under DIP-0003 / DIP-0028 rules for non-shared
-masternodes AND remains valid against a v5 masternode for the
+ProRegTx (type `1`) is reused at payload version 4 with
+`isSharedCollateral == true` for shared registration. The base `ProUpRegTx`
+(type `3`) is invalid against a shared-collateral masternode
+(`state.isSharedCollateral == true`) and is unaffected for non-shared
+masternodes. The base `ProUpServTx` (type `2`) continues to operate under
+DIP-0003 / DIP-0028 rules for non-shared masternodes AND remains valid against a shared-collateral masternode for the
 operator-authorized fields enumerated in [Authorization
 Tiers](#authorization-tiers); `ProUpServTx` MUST NOT attempt to modify any
 owner-controlled or shared-collateral field.
@@ -250,8 +292,8 @@ The shared collateral output uses a single, fixed serialized script,
 1. It is a fixed byte sequence specified by this DIP; every shared collateral
    output on every network uses the identical script bytes. Script-template
    equality is the registration-time selector used to identify which output
-   of a v5 ProRegTx is the shared collateral output; it is NOT, on its own,
-   the consensus identifier of a protected collateral.
+   of a v4 shared-collateral ProRegTx is the shared collateral output; it is
+   NOT, on its own, the consensus identifier of a protected collateral.
 2. It contains no participant-specific data. In particular, it does not embed
    any participant owner key, refund script, reward script, share amount, or
    `proTxHash`. The per-masternode binding between an outpoint and a
@@ -262,25 +304,28 @@ The shared collateral output uses a single, fixed serialized script,
    shared collateral.
 4. After activation, consensus and mempool policy protect the following shared collateral outpoint sets:
    * (a) **Registered shared collateral outpoints** — outpoints recorded
-     as the collateral of a registered v5 masternode in the deterministic
+     as the collateral of a registered shared-collateral masternode
+     (`state.isSharedCollateral == true`) in the deterministic
      masternode list at the parent state of the block (or mempool tip)
      being validated, including PoSe-banned entries that remain registered.
      A spend of an outpoint in this class is rejected unless the spending
      transaction is a valid `ProDisTx` for the corresponding masternode.
    * (b) **Same-block pending shared collateral outputs** — shared
-     collateral outputs created by a valid v5 ProRegTx earlier in the
-     block currently being validated. A spend of an output in this
-     class later in the same block is rejected unconditionally: ordinary
-     spends are rejected because the outpoint represents a freshly
-     created masternode commitment, and `ProDisTx` is rejected because
-     the registration is not yet part of the parent deterministic state
-     a dissolution would consult. Dissolution of such a masternode is
-     permitted only in a strictly later block, after the registration
-     has been recorded in the deterministic masternode list.
+     collateral outputs created by a valid v4 ProRegTx with
+     `isSharedCollateral == true` earlier in the block currently being
+     validated. A spend of an output in this class later in the same
+     block is rejected unconditionally: ordinary spends are rejected
+     because the outpoint represents a freshly created masternode
+     commitment, and `ProDisTx` is rejected because the registration is
+     not yet part of the parent deterministic state a dissolution would
+     consult. Dissolution of such a masternode is permitted only in a
+     strictly later block, after the registration has been recorded in
+     the deterministic masternode list.
    * (c) **Mempool pending shared collateral outputs** — shared
-     collateral outputs created by an unconfirmed valid v5 ProRegTx in
-     the mempool. A mempool spend of an output in this class is rejected
-     unconditionally until the registration confirms.
+     collateral outputs created by an unconfirmed valid v4 ProRegTx with
+     `isSharedCollateral == true` in the mempool. A mempool spend of an
+     output in this class is rejected unconditionally until the
+     registration confirms.
    Rejection is enforced at mempool acceptance, at block connection, and
    during deterministic masternode list processing (see [Collateral
    Spend Enforcement](#collateral-spend-enforcement)).
@@ -290,13 +335,13 @@ The shared collateral output uses a single, fixed serialized script,
    subject to whatever spending conditions the recommended template
    imposes (for example, the `OP_TRUE` redeem-script template makes them
    anyone-can-spend). Implementations MUST NOT retroactively lock arbitrary
-   pre-existing outputs or unrelated outputs created outside the v5
-   registration flow.
+   pre-existing outputs or unrelated outputs created outside the
+   shared-collateral registration flow.
 6. Before activation, upgraded relays and miners MUST treat any output with
    this script as non-standard and SHOULD NOT mine it, so ordinary relay and
    mining policy discourages creating such outputs before activation. After
    activation, the only way for a transaction to register an outpoint into the
-   protected set is a valid v5 ProRegTx;
+   protected set is a valid v4 ProRegTx with `isSharedCollateral == true`;
    relay and mining policy MUST continue to treat any other output bearing
    `SHARED_COLLATERAL_SCRIPT` as non-standard to discourage accidental
    creation of stranded anyone-can-spend outputs.
@@ -308,7 +353,8 @@ SHARED_COLLATERAL_SCRIPT = 0x51
 ```
 
 This bare anyone-can-spend script is deliberately non-standard except when it
-appears as the collateral output of a valid v5 ProRegTx after activation.
+appears as the collateral output of a valid v4 ProRegTx with
+`isSharedCollateral == true` after activation.
 Script-level satisfaction is trivial, but consensus rules above script
 evaluation reject every protected spend except a valid `ProDisTx`. Embedding
 per-masternode commitments (such as `proTxHash` or participant keys) into the
@@ -349,15 +395,17 @@ Field rules at registration:
 5. `ownerKey` MUST be distinct from every active owner key recorded for any
    other registered masternode at the registration height. The
    unique-property index defined in DIP-0003 is extended to track every
-   `shares[i].ownerKey` for v5 masternodes (see [Deterministic Masternode
-   State](#deterministic-masternode-state)).
+   `shares[i].ownerKey` for shared-collateral masternodes (see
+   [Deterministic Masternode State](#deterministic-masternode-state)).
 6. `refundScript` MUST NOT be duplicated within the share table.
 7. Effective reward scripts MUST NOT be duplicated within the share table. For
    this rule, an empty `rewardScript` is interpreted as `refundScript` before
    duplicate detection.
 8. No `refundScript` and no `rewardScript` may be a P2PKH script paying to
-   `keyIDOwner` (for v5 the field is absent — see below), `keyIDVoting`, or
-   to a key ID that equals any `shares[i].ownerKey`. The intent matches
+   `keyIDVoting` or to a key ID that equals any `shares[i].ownerKey`. There
+   is no `keyIDOwner` field in shared-collateral mode — see [Shared
+   Registration (ProRegTx v4, shared
+   mode)](#shared-registration-proregtx-v4-shared-mode). The intent matches
    the DIP-0026 key-reuse rule: these scripts are spent in lower-trust
    wallet contexts and MUST NOT reuse keys that control masternode state.
 9. `joinSig` is a 65-byte compact ECDSA signature by `ownerKey` over the
@@ -365,23 +413,25 @@ Field rules at registration:
    Digest](#registration-consent-digest). Any other length or any
    signature that does not verify under `ownerKey` is invalid.
 
-### Shared Registration (ProRegTx v5)
+### Shared Registration (ProRegTx v4, shared mode)
 
-A v5 ProRegTx has the same general layout as the v4 ProRegTx from DIP-0026
-with the following differences. Field positions for a v5 payload are
-specified normatively below; this list is exhaustive and replaces the v4
-ProRegTx layout for `nVersion == 5`.
+A v4 ProRegTx with `isSharedCollateral == true` uses the field layout below.
+Field positions for the shared-collateral variant are specified normatively
+here; this list is exhaustive and defines the v4 ProRegTx layout for
+`isSharedCollateral == true`. The v4 layout for `isSharedCollateral == false`
+is unchanged from DIP-0026 and is NOT defined by this DIP.
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `nVersion` | `uint16_t` | MUST be `5`. |
+| `nVersion` | `uint16_t` | MUST be `4`. |
 | `nType` | `MnType` (`uint16_t`) | `Regular` or `Evo`. |
 | `nMode` | `uint16_t` | MUST be `0`. |
+| `isSharedCollateral` | `uint8_t` | MUST be `0x01` to select the shared-collateral variant defined in this section. `0x00` selects the unchanged DIP-0026 multi-payout variant and is not governed by this DIP. Any other value is invalid. |
 | `collateralOutpoint.hash` | `uint256` | MUST be the null hash. |
 | `collateralOutpoint.n` | `uint32_t` | Index of the shared collateral output within this transaction. |
-| `netInfo` | DIP-0003/0028 net info | As for v4. |
-| `pubKeyOperator` | BLS public key (basic scheme) | As for v4. |
-| `keyIDVoting` | `CKeyID` | As for v4. |
+| `netInfo` | DIP-0003/0028 net info | As for non-shared v4. |
+| `pubKeyOperator` | BLS public key (basic scheme) | As for non-shared v4. |
+| `keyIDVoting` | `CKeyID` | As for non-shared v4. |
 | `nOperatorReward` | `uint16_t` | Basis points; MUST be from 0 to 10000. |
 | `shares` | `CollateralShare[]` | CompactSize-prefixed vector of 2 to 8 entries; per [Collateral Share](#collateral-share). |
 | `earlyPeriodBlocks` | `uint32_t` | `0` to `SHARED_MAX_EARLY_PERIOD_BLOCKS`. |
@@ -389,59 +439,66 @@ ProRegTx layout for `nVersion == 5`.
 | `standardPenalty` | `CAmount` (8 bytes) | Duffs. |
 | `inputsHash` | `uint256` | `CalcTxInputsHash(tx)`. |
 | `platformNodeID`, `platformNetInfo` (Evo only) | as DIP-0028 | Serialized after `inputsHash` and before `vchSig`, preserving the DIP-0028 insertion point. |
-| `vchSig` | `vector<unsigned char>` | MUST be empty for v5 (no external collateral signature). |
+| `vchSig` | `vector<unsigned char>` | MUST be empty in shared-collateral mode (no external collateral signature). |
 
-There is no `keyIDOwner` field in a v5 ProRegTx. The role of the single owner
-key in DIP-0003 is performed in v5 by the collection of `shares[*].ownerKey`.
+There is no `keyIDOwner` field in a shared-collateral v4 ProRegTx. The role
+of the single owner key in DIP-0003 is performed in shared-collateral mode by
+the collection of `shares[*].ownerKey`. The non-shared v4 ProRegTx retains
+its `keyIDOwner` field unchanged.
 
-There is no `scriptPayout` or `payouts` field in a v5 ProRegTx. Owner rewards
-are derived directly from the share table as specified in [Reward
-Distribution](#reward-distribution).
+There is no `scriptPayout` or `payouts` field in a shared-collateral v4
+ProRegTx. Owner rewards are derived directly from the share table as
+specified in [Reward Distribution](#reward-distribution). The non-shared v4
+ProRegTx retains its DIP-0026 payout list unchanged.
 
 Unless explicitly replaced by this section, the base ProRegTx validation rules
-from DIP-0003, DIP-0026, and DIP-0028 continue to apply to v5 registrations.
-This includes network-info validation, Evo Platform-field validation,
-operator-key validity, and operator-key uniqueness.
+from DIP-0003, DIP-0026, and DIP-0028 continue to apply to shared-collateral
+v4 registrations. This includes network-info validation, Evo Platform-field
+validation, operator-key validity, and operator-key uniqueness.
 
-A v5 ProRegTx is invalid if any of the following conditions hold:
+A v4 ProRegTx with `isSharedCollateral == true` is invalid if any of the
+following conditions hold:
 
-1. `nVersion != 5`.
-2. `nType` is not `Regular` or `Evo`.
-3. `nMode != 0`.
-4. `netInfo` fails the applicable DIP-0003 network-info validation rules.
-5. For Evo masternodes, any Platform field fails the applicable DIP-0028
+1. `nVersion != 4`.
+2. `isSharedCollateral` is neither `0x00` nor `0x01`. (When
+   `isSharedCollateral == 0x00`, the payload is governed by DIP-0026 and the
+   remaining rules in this list do not apply.)
+3. `nType` is not `Regular` or `Evo`.
+4. `nMode != 0`.
+5. `netInfo` fails the applicable DIP-0003 network-info validation rules.
+6. For Evo masternodes, any Platform field fails the applicable DIP-0028
    validation rules.
-6. `pubKeyOperator` is not a valid basic-scheme BLS public key or collides
+7. `pubKeyOperator` is not a valid basic-scheme BLS public key or collides
    with the operator key of any other registered masternode.
-7. `collateralOutpoint.hash` is not the null hash.
-8. `collateralOutpoint.n` does not point to an output of this transaction.
-9. The output at `collateralOutpoint.n` does not pay
-   `GetMnType(nType).collat_amount` to `SHARED_COLLATERAL_SCRIPT`.
-10. The transaction creates more than one output paying
+8. `collateralOutpoint.hash` is not the null hash.
+9. `collateralOutpoint.n` does not point to an output of this transaction.
+10. The output at `collateralOutpoint.n` does not pay
+    `GetMnType(nType).collat_amount` to `SHARED_COLLATERAL_SCRIPT`.
+11. The transaction creates more than one output paying
     `SHARED_COLLATERAL_SCRIPT`.
-11. `shares.size()` is less than `SHARED_MIN_PARTICIPANTS` or greater than
+12. `shares.size()` is less than `SHARED_MIN_PARTICIPANTS` or greater than
     `SHARED_MAX_PARTICIPANTS`.
-12. Any share fails its per-field validation rules in [Collateral
+13. Any share fails its per-field validation rules in [Collateral
     Share](#collateral-share).
-13. Any `shares[i].amount` fails `MoneyRange`, is less than
+14. Any `shares[i].amount` fails `MoneyRange`, is less than
     `SHARED_MIN_SHARE_DUFFS`, or is greater than
     `GetMnType(nType).collat_amount`.
-14. The exact overflow-safe sum of all `shares[i].amount` values does not
+15. The exact overflow-safe sum of all `shares[i].amount` values does not
     equal `GetMnType(nType).collat_amount`, or the summation overflows.
-15. `nOperatorReward > 10000`.
-16. Penalty parameter constraints in [Parameters](#parameters) are not
+16. `nOperatorReward > 10000`.
+17. Penalty parameter constraints in [Parameters](#parameters) are not
     satisfied.
-17. `earlyPeriodBlocks > SHARED_MAX_EARLY_PERIOD_BLOCKS`.
-18. `vchSig` is non-empty.
-19. `inputsHash != CalcTxInputsHash(tx)`.
-20. For any share `i`, `shares[i].joinSig` does not verify against
+18. `earlyPeriodBlocks > SHARED_MAX_EARLY_PERIOD_BLOCKS`.
+19. `vchSig` is non-empty.
+20. `inputsHash != CalcTxInputsHash(tx)`.
+21. For any share `i`, `shares[i].joinSig` does not verify against
     `shares[i].ownerKey` over the registration consent digest defined
     below.
 
-Rules 18 and 19 are evaluated before any ECDSA signature verification.
+Rules 19 and 20 are evaluated before any ECDSA signature verification.
 Consensus computes `outputsHash` from the transaction outputs when building
 the registration consent digest; there is no payload `outputsHash` field in
-a v5 ProRegTx.
+a shared-collateral v4 ProRegTx.
 
 ### Registration Consent Digest
 
@@ -457,6 +514,7 @@ SharedRegConsentHash = SHA256d(
     inputsHash         || sequencesHash   || outputsHash ||
     LE16(payload.nVersion) ||
     LE16(payload.nType) || LE16(payload.nMode) ||
+    LE8(payload.isSharedCollateral) ||
     LE32(payload.collateralOutpoint.n) ||
     netInfoSerialized ||
     platformFieldsSerialized ||      // present iff nType == Evo
@@ -470,6 +528,10 @@ SharedRegConsentHash = SHA256d(
     LE64(standardPenalty)
 )
 ```
+
+The digest commits explicitly to `payload.isSharedCollateral` so that a
+signature produced under one variant cannot be reinterpreted under the
+other.
 
 Where:
 
@@ -519,11 +581,12 @@ fields a participant would otherwise believe they had committed to.
 ### Shared Update Transactions
 
 Two new special transaction types specialize updates for shared
-masternodes. The base `ProUpRegTx` (type `3`) is invalid for v5 masternodes,
-because its single-owner authorization model is incompatible with the
-shared-registrar tier defined here. The base `ProUpServTx` (type `2`)
-remains valid for v5 masternodes with operator authorization (see
-[Authorization Tiers](#authorization-tiers)).
+masternodes. The base `ProUpRegTx` (type `3`) is invalid for shared-collateral
+masternodes (`state.isSharedCollateral == true`), because its single-owner
+authorization model is incompatible with the shared-registrar tier defined
+here. The base `ProUpServTx` (type `2`) remains valid for shared-collateral
+masternodes with operator authorization (see [Authorization
+Tiers](#authorization-tiers)).
 
 #### ProUpShareTx (type 11)
 
@@ -542,15 +605,16 @@ CProUpShareTx {
 ```
 
 `nVersion` here is the independent payload version of the new
-`TRANSACTION_PROVIDER_UPDATE_SHARE` special transaction; it is NOT the
-provider payload version `ProTxVersion::SharedCollateral = 5` of the v5
-`ProRegTx`. The two version namespaces are separate.
+`TRANSACTION_PROVIDER_UPDATE_SHARE` special transaction; it is NOT the v4
+ProRegTx provider payload version. The two version namespaces are separate,
+and the `ProUpShareTx` payload version evolves independently of the v4
+ProRegTx payload version.
 
 Validation:
 
 1. `nVersion` MUST be `1`.
-2. The masternode identified by `proTxHash` MUST exist and MUST be a v5
-   masternode.
+2. The masternode identified by `proTxHash` MUST exist and MUST satisfy
+   `state.isSharedCollateral == true`.
 3. `shareIndex` MUST be less than `shares.size()` in the current state.
 4. `newRewardScript` MUST be empty or a standard `P2PKH` or `P2SH` script.
    An empty `newRewardScript` is interpreted as
@@ -607,13 +671,13 @@ CProUpSharedRegTx {
 
 As with `ProUpShareTx`, this `nVersion` is the independent payload version
 of the new `TRANSACTION_PROVIDER_UPDATE_SHARED_REGISTRAR` special
-transaction and is unrelated to `ProTxVersion::SharedCollateral = 5`.
+transaction and is unrelated to the v4 ProRegTx provider payload version.
 
 Validation:
 
 1. `nVersion` MUST be `1`.
-2. The masternode identified by `proTxHash` MUST exist and MUST be a v5
-   masternode.
+2. The masternode identified by `proTxHash` MUST exist and MUST satisfy
+   `state.isSharedCollateral == true`.
 3. `pubKeyOperator` MUST be a valid basic-scheme BLS public key and MUST
    NOT collide with the operator key of any other registered masternode.
 4. `keyIDVoting` MUST be non-null and MUST NOT equal any
@@ -661,7 +725,7 @@ reset: `scriptOperatorPayout` becomes empty, `netInfo` becomes the empty
 network-info value for the masternode's state version, Platform identifiers
 become null/empty, and the masternode is marked PoSe-banned until the new
 operator submits a valid `ProUpServTx`. This mirrors the existing
-operator-key-reset behavior for non-v5 masternodes and prevents stale
+operator-key-reset behavior for non-shared masternodes and prevents stale
 operator payout or endpoint state from carrying across an operator change.
 
 ### Authorization Tiers
@@ -682,15 +746,17 @@ operator payout or endpoint state from carrying across an operator change.
 | Platform service endpoints (Evo) | Operator BLS key | `ProUpServTx` |
 | PoSe revocation | Operator BLS key | `ProUpRevTx` |
 
-`ProUpRegTx` (type `3`) is invalid against a v5 masternode. `ProUpServTx` and
-`ProUpRevTx` continue to use operator authorization as in DIP-0003 and
-DIP-0028. The operator can stop service or revoke the masternode but cannot
-redirect owner rewards or spend the shared collateral.
+`ProUpRegTx` (type `3`) is invalid against a shared-collateral masternode
+(`state.isSharedCollateral == true`). `ProUpServTx` and `ProUpRevTx` continue
+to use operator authorization as in DIP-0003 and DIP-0028. The operator can
+stop service or revoke the masternode but cannot redirect owner rewards or
+spend the shared collateral.
 
 ### Reward Distribution
 
-Owner-reward distribution for a v5 masternode reuses the DIP-0026 pipeline
-but weights by share amount rather than by basis points.
+Owner-reward distribution for a shared-collateral masternode
+(`state.isSharedCollateral == true`) reuses the DIP-0026 pipeline but weights
+by share amount rather than by basis points.
 
 1. Compute the masternode reward and apply the Platform credit-pool
    reallocation as in current rules.
@@ -733,8 +799,9 @@ without calling `DistributeByWeight` (see [Dissolution
 (ProDisTx)](#dissolution-prodistx)).
 
 Coinbase validation requires every expected per-share reward output by exact
-amount and script. As in DIP-0026, the relative order of outputs within the
-coinbase is not consensus-significant.
+amount and script for every shared-collateral masternode scheduled in the
+block. As in DIP-0026, the relative order of outputs within the coinbase is
+not consensus-significant.
 
 The `DistributeByWeight` helper is also used in [Dissolution
 (ProDisTx)](#dissolution-prodistx) for penalty redistribution.
@@ -758,8 +825,8 @@ CProDisTx {
 ```
 
 `nVersion` here is the independent payload version of the new
-`TRANSACTION_PROVIDER_DISSOLVE` special transaction and is unrelated to
-`ProTxVersion::SharedCollateral = 5`.
+`TRANSACTION_PROVIDER_DISSOLVE` special transaction and is unrelated to the
+v4 ProRegTx provider payload version.
 
 #### Transaction shape
 
@@ -804,7 +871,7 @@ Consent Digest](#registration-consent-digest); a dissolution signed against
 one `chainGenesisHash` MUST NOT verify on a network with a different
 genesis hash. Each signer MUST independently verify the network / chain
 context before producing its `vchSigs` entry. `payload.nVersion` here is
-the dissolution payload version (currently `1`), not the v5 ProRegTx
+the dissolution payload version (currently `1`), not the v4 ProRegTx
 provider payload version.
 
 #### Period and penalty
@@ -928,18 +995,17 @@ miners include them.
 
 #### Same-block ordering
 
-A `ProDisTx` MUST NOT appear in the same block as the v5 `ProRegTx`
-that creates the shared collateral output it would spend. Dissolution
-operates against the deterministic masternode state at the parent
-block, so the registering masternode is not yet part of that state
-until the registering block has been connected. A `ProDisTx` whose
-input refers to a shared collateral output created earlier in the
-same block is therefore invalid even if every other covenant rule
-would otherwise hold; dissolution is permitted only in a strictly
-later block. Block validation MUST track shared collateral outputs
-created earlier in the same block solely so that any spend of those
-outputs later in the same block — ordinary or `ProDisTx` — can be
-rejected (see [Collateral Spend
+A `ProDisTx` MUST NOT appear in the same block as the v4 ProRegTx with
+`isSharedCollateral == true` that creates the shared collateral output it
+would spend. Dissolution operates against the deterministic masternode state
+at the parent block, so the registering masternode is not yet part of that
+state until the registering block has been connected. A `ProDisTx` whose
+input refers to a shared collateral output created earlier in the same block
+is therefore invalid even if every other covenant rule would otherwise hold;
+dissolution is permitted only in a strictly later block. Block validation
+MUST track shared collateral outputs created earlier in the same block solely
+so that any spend of those outputs later in the same block — ordinary or
+`ProDisTx` — can be rejected (see [Collateral Spend
 Enforcement](#collateral-spend-enforcement)).
 
 #### State effect
@@ -952,33 +1018,37 @@ until the corresponding `ProDisTx` has been validated.
 ### Collateral Spend Enforcement
 
 Provider transaction `CheckSpecialTx` validation alone is insufficient to
-enforce the shared collateral covenant: an ordinary transaction that
-spends the shared collateral outpoint of a registered v5 masternode but
-bears no special-transaction payload would, under DIP-0003 rules, simply
-remove the masternode by collateral spend. Implementations MUST also
-enforce the rules below outside `CheckSpecialTx`.
+enforce the shared collateral covenant: an ordinary transaction that spends
+the shared collateral outpoint of a registered shared-collateral masternode
+(`state.isSharedCollateral == true`) but bears no special-transaction payload
+would, under DIP-0003 rules, simply remove the masternode by collateral
+spend. Implementations MUST also enforce the rules below outside
+`CheckSpecialTx`.
 
 The protected set has three parts with different rules:
 
 * **Registered set.** Every collateral outpoint recorded against a
-  registered v5 masternode in the deterministic masternode list at the
-  parent of the block (or mempool tip) being validated, including
-  PoSe-banned entries that remain registered until removed by a valid
-  `ProDisTx`. A spend of an outpoint in the registered set is rejected
-  unless it is a valid `ProDisTx` for the matching masternode.
+  registered shared-collateral masternode
+  (`state.isSharedCollateral == true`) in the deterministic masternode list at
+  the parent of the block
+  (or mempool tip) being validated, including PoSe-banned entries that
+  remain registered until removed by a valid `ProDisTx`. A spend of an
+  outpoint in the registered set is rejected unless it is a valid
+  `ProDisTx` for the matching masternode.
 * **Same-block pending set.** Every shared collateral outpoint created
-  by a valid v5 ProRegTx earlier in the block currently being
-  validated. A spend of an outpoint in the same-block pending set is
-  rejected unconditionally: ordinary spends are rejected because the
-  outpoint represents an active masternode commitment, and `ProDisTx`
-  spends are rejected because the registration is not yet part of the
-  parent deterministic state. Dissolution of such a masternode is
-  permitted only in a strictly later block.
+  by a valid v4 ProRegTx with `isSharedCollateral == true` earlier in
+  the block currently being validated. A spend of an outpoint in the
+  same-block pending set is rejected unconditionally: ordinary spends
+  are rejected because the outpoint represents an active masternode
+  commitment, and `ProDisTx` spends are rejected because the
+  registration is not yet part of the parent deterministic state.
+  Dissolution of such a masternode is permitted only in a strictly
+  later block.
 * **Mempool pending set.** Every shared collateral outpoint created by
-  an unconfirmed v5 ProRegTx accepted into the mempool. A mempool
-  transaction that spends an outpoint in this set is rejected
-  unconditionally until the registration confirms and the outpoint moves
-  into the registered set.
+  an unconfirmed v4 ProRegTx with `isSharedCollateral == true` accepted
+  into the mempool. A mempool transaction that spends an outpoint in
+  this set is rejected unconditionally until the registration confirms
+  and the outpoint moves into the registered set.
 
 A UTXO whose `scriptPubKey` equals `SHARED_COLLATERAL_SCRIPT` but whose
 outpoint is in neither set is NOT protected by the covenant and is not
@@ -997,36 +1067,38 @@ match the template.
    `ProDisTx`. The same-block pending set is computed per block by
    block-connection logic; the mempool pending set prevents miners from
    assembling an invalid parent-plus-child package around an
-   unconfirmed v5 registration.
+   unconfirmed shared-collateral registration.
 2. **Block connection, prior blocks.** Before applying the deterministic
    masternode list update for a connected block, scan every non-coinbase
    transaction in that block for inputs that spend outpoints in the
-   registered set (collateral outpoints of registered v5 masternodes,
-   including PoSe-banned entries, in the parent-state deterministic
-   masternode list). Reject the block unless
-   every such input is the input of a valid `ProDisTx` for the matching
-   masternode.
+   registered set (collateral outpoints of registered shared-collateral
+   masternodes, including PoSe-banned entries, in the parent-state
+   deterministic masternode list). Reject the block unless every such
+   input is the input of a valid `ProDisTx` for the matching masternode.
 3. **Block connection, same-block.** Maintain a per-block index of
-   shared collateral outputs created by valid v5 ProRegTx earlier in
-   the same block, keyed by `(txid, vout, proTxHash)`. For every later
-   non-coinbase transaction in the same block, reject any input that
-   spends such an output. Both ordinary spends and `ProDisTx` spends
-   are rejected: a `ProDisTx` whose input refers to a shared collateral
-   output created in the same block is invalid even if every other
-   covenant rule would otherwise hold.
+   shared collateral outputs created by valid v4 ProRegTx with
+   `isSharedCollateral == true` earlier in the same block, keyed by
+   `(txid, vout, proTxHash)`. For every later non-coinbase transaction
+   in the same block, reject any input that spends such an output. Both
+   ordinary spends and `ProDisTx` spends are rejected: a `ProDisTx`
+   whose input refers to a shared collateral output created in the same
+   block is invalid even if every other covenant rule would otherwise
+   hold.
 4. **Deterministic masternode list removal.** Replace the
    "remove on collateral spend" rule from DIP-0003 with the following
-   for v5 masternodes: a v5 masternode MUST NOT be removed until a
+   for shared-collateral masternodes: a shared-collateral masternode
+   (`state.isSharedCollateral == true`) MUST NOT be removed until a
    corresponding valid `ProDisTx` for that `proTxHash` has been
    processed in a strictly later block than the block that contained
-   the registering v5 ProRegTx. Any spend of the masternode's shared
+   the registering v4 ProRegTx. Any spend of the masternode's shared
    collateral outpoint by a transaction that is not such a `ProDisTx`
    is invalid.
 5. **Block disconnection and reorg.** Disconnecting a block that
-   contained a `ProDisTx` MUST restore the v5 masternode entry to the
-   exact pre-dissolution deterministic masternode state. State diffs
-   MUST capture the full share vector and shared-registration
-   parameters as a single replacement (see [Deterministic Masternode
+   contained a `ProDisTx` MUST restore the shared-collateral masternode
+   entry to the exact pre-dissolution deterministic masternode state.
+   State diffs MUST capture the full share vector and
+   shared-registration parameters as a single replacement (see
+   [Deterministic Masternode
    State](#deterministic-masternode-state)) so that reorg replay is
    deterministic.
 
@@ -1044,12 +1116,14 @@ to the covenant and are script-evaluated normally.
 ### Deterministic Masternode State
 
 The deterministic masternode state defined in DIP-0003 is extended for
-v5 masternodes. The pre-v5 state serialization is unchanged.
+shared-collateral masternodes. The pre-shared and non-shared serialization
+is unchanged.
 
-For `nVersion == ProTxVersion::SharedCollateral`, the masternode state
-includes the following additional fields. A future provider payload version
-MUST NOT be interpreted as shared collateral unless that future DIP explicitly
-extends the shared-collateral version family and defines its state encoding.
+The deterministic masternode state for every masternode includes the
+`isSharedCollateral` flag carried from its registering v4 ProRegTx (or
+implicitly `false` for masternodes registered under earlier provider payload
+versions). When `state.isSharedCollateral == true`, the masternode state
+includes the following additional fields:
 
 | Field | Type | Notes |
 | --- | --- | --- |
@@ -1058,14 +1132,16 @@ extends the shared-collateral version family and defines its state encoding.
 | `earlyPenalty` | `CAmount` | Frozen at registration. |
 | `standardPenalty` | `CAmount` | Frozen at registration. |
 
-The fields `scriptPayout` and `payouts` are unused for v5 masternodes and
-MUST be serialized as empty. `keyIDOwner` is absent from the v5 payload and
-MUST NOT participate in v5 validation or uniqueness indexes. If an
+The fields `scriptPayout` and `payouts` are unused when
+`state.isSharedCollateral == true` and MUST be serialized as empty.
+`keyIDOwner` is absent from the shared-collateral v4 ProRegTx and MUST NOT
+participate in shared-collateral validation or uniqueness indexes. If an
 implementation's deterministic state object contains a legacy `keyIDOwner`
-field, that field MUST be serialized as null/zero for v5 masternodes and MUST
-be ignored whenever `isSharedCollateral` is true.
+field, that field MUST be serialized as null/zero whenever
+`state.isSharedCollateral == true` and MUST be ignored whenever
+`state.isSharedCollateral` is true.
 
-State diffs MUST be version-gated:
+State diffs MUST be gated on `state.isSharedCollateral`:
 
 1. The state-diff bitfield gains a new field bit for the share vector
    (exact bit value deferred; see [Open Issues](#open-issues)).
@@ -1073,13 +1149,15 @@ State diffs MUST be version-gated:
    per-share `rewardScript` change from a `ProUpShareTx`) MUST produce
    a state diff in which the entire share vector is fully replaced.
    This full-replacement encoding is the single canonical
-   representation of a v5 share-state diff: compact diffs, per-share
-   field diffs, and any other alternative encoding of share-vector
-   changes are NOT permitted. Implementations MUST emit and accept
-   share-vector changes only as a full replacement of the share
-   vector.
-2. State diffs for v5 fields are present only when the masternode is
-   v5; for pre-v5 masternodes the corresponding bits MUST NOT appear.
+   representation of a shared-collateral share-state diff: compact
+   diffs, per-share field diffs, and any other alternative encoding of
+   share-vector changes are NOT permitted. Implementations MUST emit
+   and accept share-vector changes only as a full replacement of the
+   share vector.
+2. State diffs for shared-collateral fields are present only when
+   `state.isSharedCollateral == true`; for non-shared masternodes (both
+   pre-v4 and v4 with `isSharedCollateral == false`) the corresponding
+   bits MUST NOT appear.
 3. Snapshot serialization MUST round-trip across restart, reorg replay,
    and historic block validation without loss.
 
@@ -1087,49 +1165,52 @@ Unique-property indexes MUST be extended:
 
 * Every `shares[i].ownerKey` participates in the owner-key uniqueness
   index used to reject reuse across masternodes at registration time.
-  Pre-v5 masternodes contribute their single `keyIDOwner`; v5
-  masternodes contribute every participant owner key.
+  Non-shared masternodes contribute their single `keyIDOwner`;
+  shared-collateral masternodes contribute every participant owner key.
 * No network-wide uniqueness index is added for `keyIDVoting`. As in
-  DIP-0003, the voting key may be delegated and reused; v5 validation only
-  forbids `keyIDVoting` from equaling any participant owner key for the same
-  masternode.
+  DIP-0003, the voting key may be delegated and reused; shared-collateral
+  validation only forbids `keyIDVoting` from equaling any participant owner
+  key for the same masternode.
 * The operator-key uniqueness index applies to `pubKeyOperator` as in
   DIP-0003.
 
-A v5 masternode is created only by a valid v5 ProRegTx and removed only
-by a valid v5 `ProDisTx` for the same `proTxHash`. Pre-v5 masternodes
-continue to be created and removed as in DIP-0003.
+A shared-collateral masternode is created only by a valid v4 ProRegTx with
+`isSharedCollateral == true` and removed only by a valid `ProDisTx` for the
+same `proTxHash`. Non-shared masternodes continue to be created and removed
+as in DIP-0003 and DIP-0026.
 
 ### Simplified Masternode List and Filters
 
 `CSimplifiedMNListEntry::CalcHash`, as used by DIP-0004 simplified
 masternode list verification, MUST NOT include shares, refund scripts,
-reward scripts, penalty parameters, or any other v5-only field. Light
-clients receive no SML commitment to shared-collateral metadata.
-Diagnostic RPCs and extended JSON output MAY expose v5 fields.
+reward scripts, penalty parameters, or any other shared-collateral-only
+field. Light clients receive no SML commitment to shared-collateral
+metadata. Diagnostic RPCs and extended JSON output MAY expose
+shared-collateral fields.
 
 The trust boundary this creates is intentional and mirrors the
 direction DIP-0026 took for multi-payout metadata: shared-collateral
 fields are not committed to by SML hashes, so light clients cannot
 independently verify share amounts, refund scripts, reward scripts,
-penalty parameters, or any other v5-only field from an SML proof. A
-future extension to DIP-0004 would be required before SPV clients
-could verify shared-collateral terms without trusting a serving full
-node.
+penalty parameters, or any other shared-collateral-only field from an
+SML proof. A future extension to DIP-0004 would be required before SPV
+clients could verify shared-collateral terms without trusting a serving
+full node.
 
 Full nodes are unaffected by this boundary: a full node validates
-every v5 field from the deterministic masternode state that it
-reconstructs by replaying blocks, exactly as it does for pre-v5
-masternode state. The SML/filter limitation applies only to clients
-that depend on SML hashes or filter matches as their source of
+every shared-collateral field from the deterministic masternode state
+that it reconstructs by replaying blocks, exactly as it does for
+non-shared masternode state. The SML/filter limitation applies only to
+clients that depend on SML hashes or filter matches as their source of
 truth.
 
 Special-transaction and bloom filtering, as defined in DIP-0003 for
-`ProRegTx`/`ProUpRegTx` payout scripts, is extended for v5 masternodes:
+`ProRegTx`/`ProUpRegTx` payout scripts, is extended for shared-collateral
+transactions:
 
 | Transaction | Filter elements |
 | --- | --- |
-| `ProRegTx` v5 | Every `shares[i].refundScript`; every non-empty `shares[i].rewardScript`; every `shares[i].ownerKey`; `keyIDVoting`; `pubKeyOperator`; the shared collateral outpoint. |
+| `ProRegTx` v4 with `isSharedCollateral == true` | Every `shares[i].refundScript`; every non-empty `shares[i].rewardScript`; every `shares[i].ownerKey`; `keyIDVoting`; `pubKeyOperator`; the shared collateral outpoint. |
 | `ProUpShareTx` | `proTxHash`; the current `shares[shareIndex].ownerKey`; `newRewardScript` when non-empty. |
 | `ProUpSharedRegTx` | `proTxHash`; every current `shares[i].ownerKey`; `keyIDVoting`; `pubKeyOperator`. |
 | `ProDisTx` | `proTxHash`; every signing participant owner key required by `mode`; every refund output `scriptPubKey`, matching existing transaction-output filter semantics. |
@@ -1137,23 +1218,26 @@ Special-transaction and bloom filtering, as defined in DIP-0003 for
 These filter extensions exist solely for client-side discovery and
 relay; a filter match is NOT a consensus commitment to the matched
 data, and any light client that uses a filter match as authoritative
-evidence of v5 state still depends on the honesty of the serving full
-node.
+evidence of shared-collateral state still depends on the honesty of the
+serving full node.
 
-These filter extensions apply only to v5 special transactions after
-activation. Pre-v5 special transactions retain DIP-0003 filtering.
+These filter extensions apply only to shared-collateral special transactions
+after activation. Non-shared special transactions (including DIP-0026 v4
+with `isSharedCollateral == false`) retain their existing DIP-0003 and
+DIP-0026 filtering.
 
 ### Governance
 
-A v5 masternode retains one `keyIDVoting`, signed by the voting key recorded
-in deterministic masternode state. This DIP does not introduce fractional
-participant voting or per-share governance keys.
+A shared-collateral masternode (`state.isSharedCollateral == true`) retains
+one `keyIDVoting`, signed by the voting key recorded in deterministic
+masternode state. This DIP does not introduce fractional participant voting
+or per-share governance keys.
 
 Vote weight remains defined by existing masternode-type rules. A shared
 `Regular` masternode has the regular masternode vote weight, while a shared
 `Evo` masternode retains the DIP-0028 evonode vote weight of four relative to
-a regular masternode. The single v5 `keyIDVoting` authorizes that whole
-masternode-type vote weight.
+a regular masternode. The single shared-collateral `keyIDVoting` authorizes
+that whole masternode-type vote weight.
 
 `keyIDVoting` MAY be updated only by `ProUpSharedRegTx`, which requires
 unanimous participant signatures. There is no protocol-level mechanism for
@@ -1179,7 +1263,9 @@ subject to DIP editor assignment.
 
 Before activation:
 
-* Any provider transaction payload with `nVersion == 5` is invalid.
+* Any v4 ProRegTx payload with `isSharedCollateral == true` is invalid.
+  DIP-0026 v4 payloads with `isSharedCollateral == false` are unaffected by
+  this DIP and remain governed by DIP-0026.
 * Special transaction types `10`, `11`, and `12` are invalid.
 * Upgraded relay and mining policy MUST treat any output with
   `SHARED_COLLATERAL_SCRIPT` as non-standard and SHOULD NOT mine it.
@@ -1188,18 +1274,21 @@ Before activation:
 
 After activation:
 
-* v5 ProRegTx, `ProUpShareTx`, `ProUpSharedRegTx`, and `ProDisTx` are
-  valid as specified above.
-* DIP-0003 single-owner masternodes (v1, v2, v3) and DIP-0026
-  multi-payout masternodes (v4) continue to operate unchanged.
-* No upgrade path is defined from v1/v2/v3/v4 to v5. A shared masternode
-  is established only by a new v5 ProRegTx; a v5 masternode is wound
-  down only by a `ProDisTx`.
-* No downgrade path is defined from v5 to v1/v2/v3/v4.
+* v4 ProRegTx with `isSharedCollateral == true`, `ProUpShareTx`,
+  `ProUpSharedRegTx`, and `ProDisTx` are valid as specified above.
+* DIP-0003 single-owner masternodes (v1, v2, v3) and DIP-0026 v4
+  masternodes with `isSharedCollateral == false` continue to operate
+  unchanged.
+* No conversion path is defined from a non-shared masternode (v1/v2/v3 or
+  v4 with `isSharedCollateral == false`) to a shared-collateral masternode.
+  A shared-collateral masternode is established only by a new v4 ProRegTx
+  with `isSharedCollateral == true`; it is wound down only by a `ProDisTx`.
+* No conversion path is defined from a shared-collateral masternode back to
+  a non-shared masternode.
 
-A v5 masternode and a non-v5 masternode never appear as the same
-`proTxHash`; deterministic masternode state is version-gated as
-specified in [Deterministic Masternode
+A shared-collateral masternode and a non-shared masternode never appear as
+the same `proTxHash`; deterministic masternode state is gated on
+`state.isSharedCollateral` as specified in [Deterministic Masternode
 State](#deterministic-masternode-state).
 
 ## Rationale
@@ -1210,29 +1299,49 @@ DIP-0026 fixes the operational pain of off-chain reward distribution but
 does not constrain the registrar owner, the collateral UTXO, or the exit
 path. The most common use cases that motivate DIP-0026 (services that
 hold the collateral on behalf of multiple beneficiaries) remain
-custodial under v4. This DIP addresses that gap by binding share
-amounts, refund destinations, and the collateral itself to per-participant
-consent.
+custodial under v4 with `isSharedCollateral == false`. This DIP
+addresses that gap by binding share amounts, refund destinations, and
+the collateral itself to per-participant consent.
 
-### Distinct provider payload version
+### Explicit discriminator instead of a distinct provider payload version
 
-Reusing v4 semantics for shared collateral would either redefine
-registrar-controlled fields under a multi-signer rule or carry both a
-basis-point payout list and a share table on every v4 payload. Either
-choice complicates the v4 deserialization rules and the deterministic
-masternode state machine. Allocating a separate v5 keeps each version
-self-describing and lets nodes that have implemented v4 reject v5 by
-version check until activation.
+A provider transaction payload version is a wire-format identifier, not
+a semantic mode flag. Allocating a new ProRegTx provider payload version
+solely for shared collateral would conflate two orthogonal axes: the
+on-the-wire layout of the v4 payload, and whether the masternode that v4
+payload describes is shared. The version number would then drift apart from
+any future layout changes that are unrelated to shared collateral, and every
+downstream consumer would have to learn to treat one specific version value
+as a stand-in for "shared".
+
+Selecting shared-collateral semantics by an explicit discriminator
+(`isSharedCollateral`) within the existing v4 payload keeps the wire
+version describing only the wire format and keeps the semantic mode
+selection a first-class field that callers, validators, indexers, and
+state diffs all read directly. The discriminator is committed to by the
+registration consent digest and carried into deterministic masternode
+state, so a participant signature, a state entry, and an SML query all
+agree on the mode without inferring it from the version number, output
+shape, or script length. Future layout-level changes to the v4 payload
+can advance the wire version without altering what "shared" means; new
+shared-mode variants can advance the discriminator without consuming
+provider payload version numbers.
+
+The discriminator also keeps the non-shared v4 layout unchanged: a v4
+ProRegTx with `isSharedCollateral == false` deserializes and validates
+exactly as DIP-0026 specifies, and the variant fields specific to
+shared mode appear only when the discriminator selects them.
 
 ### Internal collateral only
 
 External shared collateral would require either a multi-signature
 collateral UTXO controlled off-chain (defeating the goal of trustless
 exit) or a covenant attached to a previously created output (out of
-scope for the existing UTXO format). Constraining v5 to internal
-collateral makes the covenant model tractable and ensures that every
-shared collateral output is created by a v5 ProRegTx whose consent
-digest committed every participant.
+scope for the existing UTXO format). Constraining shared-collateral mode
+to internal collateral makes the covenant model tractable and ensures
+that every shared collateral output is created by a v4 ProRegTx with
+`isSharedCollateral == true` whose consent digest committed every
+participant.
 
 ### Immutable share parameters
 
@@ -1306,8 +1415,9 @@ and block-validation hooks are made explicit.
 
 ### Same-block dissolution forbidden
 
-A `ProDisTx` is invalid in the same block as the v5 ProRegTx that
-creates the shared collateral output it would spend. Dissolution
+A `ProDisTx` is invalid in the same block as the v4 ProRegTx with
+`isSharedCollateral == true` that creates the shared collateral output it
+would spend. Dissolution
 operates against the deterministic masternode state at the parent
 block, so allowing same-block dissolution would require either a
 mid-block speculative state machine or a duplicated validation path
@@ -1349,44 +1459,61 @@ Implementations SHOULD include at minimum the following tests.
 
 ### Registration
 
-1. A v5 ProRegTx with two shares whose amounts sum to 1000 DASH, both
-   shares signed correctly, is valid.
-2. A v5 ProRegTx with eight shares summing to 1000 DASH, all signed, is
-   valid.
-3. A v5 ProRegTx with `nOperatorReward > 10000` is invalid.
-4. A v5 ProRegTx with one share is invalid.
-5. A v5 ProRegTx with nine shares is invalid.
-6. A v5 ProRegTx whose share amounts sum to 999.99 DASH is invalid.
-7. A v5 ProRegTx whose share summation overflows is invalid.
-8. A v5 ProRegTx with any individual share amount outside `MoneyRange` or
-   greater than `GetMnType(nType).collat_amount` is invalid.
-9. A v5 ProRegTx with a duplicate participant owner key is invalid.
-10. A v5 ProRegTx with a duplicate refund script is invalid.
-11. A v5 ProRegTx with duplicate effective reward scripts is invalid.
-12. A v5 ProRegTx with a refund script paying to a participant owner key
-    is invalid.
-13. A v5 ProRegTx whose collateral output uses a P2PKH script (not
-    `SHARED_COLLATERAL_SCRIPT`) is invalid.
-14. A v5 ProRegTx whose `vchSig` is non-empty is invalid.
-15. A v5 ProRegTx whose `joinSig` for share `i` was produced under a
-    different `outputsHash` is invalid.
-16. A v5 ProRegTx whose `joinSig` for share `i` was produced under different
-    input sequences is invalid.
-17. A v5 ProRegTx whose `joinSig` for share `i` was produced under a
-    different penalty value is invalid.
+1. A v4 ProRegTx with `isSharedCollateral == true` and two shares whose
+   amounts sum to 1000 DASH, both shares signed correctly, is valid.
+2. A v4 ProRegTx with `isSharedCollateral == true` and eight shares summing
+   to 1000 DASH, all signed, is valid.
+3. A v4 ProRegTx with `isSharedCollateral == true` and `nOperatorReward >
+   10000` is invalid.
+4. A v4 ProRegTx with `isSharedCollateral == true` and one share is invalid.
+5. A v4 ProRegTx with `isSharedCollateral == true` and nine shares is
+   invalid.
+6. A v4 ProRegTx with `isSharedCollateral == true` whose share amounts sum
+   to 999.99 DASH is invalid.
+7. A v4 ProRegTx with `isSharedCollateral == true` whose share summation
+   overflows is invalid.
+8. A v4 ProRegTx with `isSharedCollateral == true` and any individual share
+   amount outside `MoneyRange` or greater than `GetMnType(nType).collat_amount`
+   is invalid.
+9. A v4 ProRegTx with `isSharedCollateral == true` and a duplicate
+   participant owner key is invalid.
+10. A v4 ProRegTx with `isSharedCollateral == true` and a duplicate refund
+    script is invalid.
+11. A v4 ProRegTx with `isSharedCollateral == true` and duplicate effective
+    reward scripts is invalid.
+12. A v4 ProRegTx with `isSharedCollateral == true` and a refund script
+    paying to a participant owner key is invalid.
+13. A v4 ProRegTx with `isSharedCollateral == true` whose collateral output
+    uses a P2PKH script (not `SHARED_COLLATERAL_SCRIPT`) is invalid.
+14. A v4 ProRegTx with `isSharedCollateral == true` whose `vchSig` is
+    non-empty is invalid.
+15. A v4 ProRegTx with `isSharedCollateral == true` whose `joinSig` for
+    share `i` was produced under a different `outputsHash` is invalid.
+16. A v4 ProRegTx with `isSharedCollateral == true` whose `joinSig` for
+    share `i` was produced under different input sequences is invalid.
+17. A v4 ProRegTx with `isSharedCollateral == true` whose `joinSig` for
+    share `i` was produced under a different penalty value is invalid.
+18. A v4 ProRegTx with `isSharedCollateral == true` whose `joinSig` for
+    share `i` was produced under `isSharedCollateral == false` is invalid;
+    the consent digest commits to the discriminator.
+19. A v4 ProRegTx with `isSharedCollateral` set to a value other than `0x00`
+    or `0x01` is invalid.
+20. A v4 ProRegTx with `isSharedCollateral == false` continues to be
+    validated by DIP-0026 unchanged and is unaffected by the rules in this
+    section.
 
 ### Reward Splitting
 
-1. A v5 masternode with shares `[500, 500]` DASH receives two coinbase
-   outputs of equal value to each `rewardScript`.
-2. A v5 masternode with shares `[300, 300, 400]` DASH receives three
-   coinbase outputs proportional to the shares, with rounding rules per
-   `DistributeByWeight`.
-3. A v5 masternode with `nOperatorReward = 1000` subtracts the operator
-   amount first, then splits the remainder by share.
+1. A shared-collateral masternode with shares `[500, 500]` DASH receives
+   two coinbase outputs of equal value to each `rewardScript`.
+2. A shared-collateral masternode with shares `[300, 300, 400]` DASH
+   receives three coinbase outputs proportional to the shares, with
+   rounding rules per `DistributeByWeight`.
+3. A shared-collateral masternode with `nOperatorReward = 1000` subtracts
+   the operator amount first, then splits the remainder by share.
 4. A coinbase missing any expected per-share output is invalid.
-5. A coinbase with an extra unexpected output for a v5 masternode is
-   invalid.
+5. A coinbase with an extra unexpected output for a shared-collateral
+   masternode is invalid.
 
 ### Updates
 
@@ -1421,7 +1548,8 @@ Implementations SHOULD include at minimum the following tests.
     `scriptOperatorPayout`, `netInfo`, and Platform identifiers and leaves the
     masternode PoSe-banned until the new operator submits a valid
     `ProUpServTx`.
-18. A `ProUpRegTx` (type `3`) targeting a v5 masternode is invalid.
+18. A `ProUpRegTx` (type `3`) targeting a shared-collateral masternode
+    (`state.isSharedCollateral == true`) is invalid.
 
 ### Dissolution
 
@@ -1461,23 +1589,27 @@ Implementations SHOULD include at minimum the following tests.
     transaction `outputsHash` is invalid; the signature check is not
     reached.
 17. A normal transaction (`nVersion < 3` or `nType == 0`) that spends
-    the collateral outpoint of a registered v5 masternode, including a
-    PoSe-banned masternode that remains registered, is rejected by mempool
-    and by block validation.
+    the collateral outpoint of a registered shared-collateral masternode,
+    including a PoSe-banned masternode that remains registered, is rejected
+    by mempool and by block validation.
 18. A non-dissolution special transaction whose input spends the
-    collateral outpoint of a registered v5 masternode is rejected.
+    collateral outpoint of a registered shared-collateral masternode is
+    rejected.
 19. A normal (non-`ProDisTx`) transaction later in the same block as a
-    v5 ProRegTx that spends the just-created shared collateral output
-    is rejected at block connection.
+    v4 ProRegTx with `isSharedCollateral == true` that spends the
+    just-created shared collateral output is rejected at block connection.
 20. A unilateral `ProDisTx` for the same `proTxHash` in the same block
-    as the v5 ProRegTx that creates its shared collateral output is
-    invalid, regardless of ordering within the block and regardless of
-    whether every other covenant rule holds.
+    as the v4 ProRegTx with `isSharedCollateral == true` that creates
+    its shared collateral output is invalid, regardless of ordering
+    within the block and regardless of whether every other covenant
+    rule holds.
 21. A unanimous `ProDisTx` for the same `proTxHash` in the same block
-    as the v5 ProRegTx that creates its shared collateral output is
-    invalid on the same basis as the unilateral case.
+    as the v4 ProRegTx with `isSharedCollateral == true` that creates
+    its shared collateral output is invalid on the same basis as the
+    unilateral case.
 22. A `ProDisTx` (unilateral or unanimous) that spends the shared
-    collateral outpoint of a v5 masternode whose v5 ProRegTx was
+    collateral outpoint of a shared-collateral masternode whose
+    registering v4 ProRegTx with `isSharedCollateral == true` was
     confirmed in a strictly earlier block, and that otherwise
     satisfies every covenant rule, is valid; the masternode is
     removed when this block is connected.
@@ -1490,12 +1622,13 @@ Implementations SHOULD include at minimum the following tests.
 
 ### Reorg
 
-1. Disconnecting a block containing a v5 ProRegTx fully removes the
-   masternode entry, including all share state.
+1. Disconnecting a block containing a v4 ProRegTx with
+   `isSharedCollateral == true` fully removes the masternode entry, including
+   all share state.
 2. Disconnecting a block containing a `ProUpShareTx` restores the
    prior `rewardScript`.
-3. Disconnecting a block containing a `ProDisTx` restores the v5
-   masternode entry with its full share state.
+3. Disconnecting a block containing a `ProDisTx` restores the
+   shared-collateral masternode entry with its full share state.
 4. Disconnecting and reconnecting a chain segment that contains a
    `ProUpSharedRegTx` followed later by a `ProDisTx` in the original
    chain order produces the same final state.
@@ -1507,14 +1640,14 @@ These notes are non-normative guidance for implementers.
 * The deterministic masternode state-diff bitfield must reserve a new bit
   for the share vector. Implementations should follow the bit-allocation
   conventions already used in `CDeterministicMNStateDiff` so that
-  pre-v5 snapshots continue to round-trip exactly.
+  non-shared snapshots continue to round-trip exactly.
 * `CheckSpecialTx` should treat shared collateral outputs as a separate
   spend-rejection rule rather than as part of the per-payload checks; the
   spend rejection applies to *every* transaction in mempool and block
   contexts, not only to special transactions.
 * The same-block index of new shared collateral outputs introduced by
-  v5 ProRegTx earlier in the block can be implemented as a small
-  `std::unordered_set<COutPoint>` (or
+  v4 ProRegTx with `isSharedCollateral == true` earlier in the block can
+  be implemented as a small `std::unordered_set<COutPoint>` (or
   `std::unordered_map<COutPoint, uint256 /* proTxHash */>` if the
   diagnostic value is wanted) that is populated as block transactions
   are validated and consulted by every later transaction's input scan.
@@ -1522,25 +1655,28 @@ These notes are non-normative guidance for implementers.
   rejected, including by `ProDisTx`; same-block dissolution is not a
   legal path.
 * Coinbase construction should reuse the existing payout-pipeline hook
-  added by DIP-0026 (PR 184) and append one output per v5 share with the
-  computed amount and target script.
+  added by DIP-0026 (PR 184) and append one output per share of every
+  scheduled shared-collateral masternode with the computed amount and
+  target script.
 * The wallet RPC surface should expose: a coordinator-style flow that
-  builds an unsigned v5 ProRegTx given each participant's funding inputs
-  and share parameters; per-participant `joinSig` production over the
-  consent digest; and a `dissolvemasternode` RPC that builds a
-  `ProDisTx`, computes the signed dissolution digest, and either
-  collects the actor's signature (unilateral) or the full set of
-  signatures (unanimous).
-* RPC output for `protx info` for a v5 masternode should expose the
-  share table, penalty parameters, and the canonical
-  `SHARED_COLLATERAL_SCRIPT` template for diagnostic purposes.
+  builds an unsigned v4 ProRegTx with `isSharedCollateral == true` given
+  each participant's funding inputs and share parameters; per-participant
+  `joinSig` production over the consent digest; and a `dissolvemasternode`
+  RPC that builds a `ProDisTx`, computes the signed dissolution digest,
+  and either collects the actor's signature (unilateral) or the full set
+  of signatures (unanimous).
+* RPC output for `protx info` for a shared-collateral masternode should
+  expose `isSharedCollateral`, the share table, penalty parameters, and
+  the canonical `SHARED_COLLATERAL_SCRIPT` template for diagnostic
+  purposes.
 
 ## Security Considerations
 
 ### Trust model
 
-A v5 masternode requires only that consensus is honest. No participant
-trusts any other participant with custody of funds. Specifically:
+A shared-collateral masternode (`state.isSharedCollateral == true`)
+requires only that consensus is honest. No participant trusts any other
+participant with custody of funds. Specifically:
 
 * Collateral cannot be spent except through a valid `ProDisTx` for the
   matching masternode, enforced by mempool and block consensus.
@@ -1608,10 +1744,11 @@ rewards could approach dust.
 ### Light client guarantees
 
 Shared-collateral metadata is not committed to by SML hashes. SPV
-clients cannot verify v5 share state without a full node or a
-DIP-0004-extending future proof. SPV-level features that depend on
-v5 metadata (filter matching of refund and reward scripts, for example)
-require the full node serving the client to be honest about v5 state.
+clients cannot verify shared-collateral share state without a full node
+or a DIP-0004-extending future proof. SPV-level features that depend on
+shared-collateral metadata (filter matching of refund and reward
+scripts, for example) require the full node serving the client to be
+honest about shared-collateral state.
 
 ### Replay across chains
 
@@ -1619,18 +1756,35 @@ Both the registration consent digest and the dissolution authorization
 digest commit explicitly to `chainGenesisHash`, the genesis block hash of
 the network on which the transaction is being authorized. The consensus
 digest domain therefore separates networks with different genesis hashes:
-a v5 registration or dissolution signed against one `chainGenesisHash`
-cannot be replayed onto a network with a different genesis hash because
-the digest verified by consensus on the target network would differ.
+a shared-collateral registration or dissolution signed against one
+`chainGenesisHash` cannot be replayed onto a network with a different
+genesis hash because the digest verified by consensus on the target
+network would differ.
 
 This does not provide replay separation between forks or deployments that
 share the same genesis block. Signers MUST verify the intended network /
 chain context before producing any `joinSig` or dissolution signature, and
-implementations deploying v5 on same-genesis forks MUST add any additional
-fork-specific replay protection they require. Relying on `proTxHash` alone
-is insufficient for cross-chain replay protection because matching
-transaction and state context across networks cannot be ruled out by
-digest construction alone.
+implementations deploying shared-collateral mode on same-genesis forks
+MUST add any additional fork-specific replay protection they require.
+Relying on `proTxHash` alone is insufficient for cross-chain replay
+protection because matching transaction and state context across networks
+cannot be ruled out by digest construction alone.
+
+### Mode-confusion across the discriminator
+
+Because the v4 ProRegTx payload version is shared between non-shared
+(DIP-0026) and shared-collateral modes, an incorrectly implemented validator
+that ignores `isSharedCollateral` could mis-parse one variant as the other.
+The registration consent digest commits to `payload.isSharedCollateral`,
+so a `joinSig` produced under one variant does not verify under the
+other; the deterministic masternode state carries
+`isSharedCollateral` as a first-class field so that all downstream
+authorization, reward, and covenant rules gate on the same flag a
+participant signed against. Implementations MUST treat
+`isSharedCollateral` as a payload-shape selector that strictly
+determines which fields are deserialized and which validation path
+runs; falling back to a "best effort" decode that tries both variants
+is invalid.
 
 ## Open Issues
 
@@ -1643,7 +1797,8 @@ before activation:
 2. **Activation deployment name.** Subject to release engineering confirmation
    that no candidate fork bit has already been consumed.
 3. **State-diff bit value for the share vector.** The exact bit position for
-   the v5 share-vector full-replacement diff MUST be assigned before activation.
+   the shared-collateral share-vector full-replacement diff MUST be assigned
+   before activation.
 
 The following protocol-level extensions are out of scope for this DIP
 and may be addressed by future DIPs:
