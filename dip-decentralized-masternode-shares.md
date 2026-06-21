@@ -383,7 +383,7 @@ ProRegTx layout for `nVersion == 5`.
 | `pubKeyOperator` | BLS public key (basic scheme) | As for v4. |
 | `keyIDVoting` | `CKeyID` | As for v4. |
 | `nOperatorReward` | `uint16_t` | Basis points; MUST be from 0 to 10000. |
-| `shares` | `CollateralShare[]` | 2 to 8 entries; per [Collateral Share](#collateral-share). |
+| `shares` | `CollateralShare[]` | CompactSize-prefixed vector of 2 to 8 entries; per [Collateral Share](#collateral-share). |
 | `earlyPeriodBlocks` | `uint32_t` | `0` to `SHARED_MAX_EARLY_PERIOD_BLOCKS`. |
 | `earlyPenalty` | `CAmount` (8 bytes) | Duffs. |
 | `standardPenalty` | `CAmount` (8 bytes) | Duffs. |
@@ -1067,7 +1067,8 @@ be ignored whenever `isSharedCollateral` is true.
 
 State diffs MUST be version-gated:
 
-1. The state-diff bitfield gains a new field bit for the share vector.
+1. The state-diff bitfield gains a new field bit for the share vector
+   (exact bit value deferred; see [Open Issues](#open-issues)).
    Any change to any field of any `shares[i]` (including a
    per-share `rewardScript` change from a `ProUpShareTx`) MUST produce
    a state diff in which the entire share vector is fully replaced.
@@ -1641,6 +1642,8 @@ before activation:
    wallet implementers.
 2. **Activation deployment name.** Subject to release engineering confirmation
    that no candidate fork bit has already been consumed.
+3. **State-diff bit value for the share vector.** The exact bit position for
+   the v5 share-vector full-replacement diff MUST be assigned before activation.
 
 The following protocol-level extensions are out of scope for this DIP
 and may be addressed by future DIPs:
